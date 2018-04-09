@@ -127,22 +127,28 @@ class Prefix<bits<3> val> {
   bits<3> Value = val;
 }
 def NoPrfx : Prefix<0>;
-def PS     : Prefix<1>;
-def PD     : Prefix<2>;
-def XS     : Prefix<3>;
-def XD     : Prefix<4>;
+def PD     : Prefix<1>;
+def XS     : Prefix<2>;
+def XD     : Prefix<3>;
+def PS     : Prefix<4>; // Similar to NoPrfx, but disassembler uses this to know
+                        // that other instructions with this opcode use PD/XS/XD
+                        // and if any of those is not supported they shouldn't
+                        // decode to this instruction. e.g. ANDSS/ANDSD don't
+                        // exist, but the 0xf2/0xf3 encoding shouldn't
+                        // disable to ANDPS.
 
 // Class specifying the opcode map.
 class Map<bits<3> val> {
   bits<3> Value = val;
 }
-def OB   : Map<0>;
-def TB   : Map<1>;
-def T8   : Map<2>;
-def TA   : Map<3>;
-def XOP8 : Map<4>;
-def XOP9 : Map<5>;
-def XOPA : Map<6>;
+def OB        : Map<0>;
+def TB        : Map<1>;
+def T8        : Map<2>;
+def TA        : Map<3>;
+def XOP8      : Map<4>;
+def XOP9      : Map<5>;
+def XOPA      : Map<6>;
+def ThreeDNow : Map<7>;
 
 // Class specifying the encoding
 class Encoding<bits<2> val> {
@@ -157,9 +163,10 @@ def EncEVEX   : Encoding<3>;
 class OperandSize<bits<2> val> {
   bits<2> Value = val;
 }
-def OpSizeFixed : OperandSize<0>; // Never needs a 0x66 prefix.
-def OpSize16    : OperandSize<1>; // Needs 0x66 prefix in 32-bit mode.
-def OpSize32    : OperandSize<2>; // Needs 0x66 prefix in 16-bit mode.
+def OpSizeFixed  : OperandSize<0>; // Never needs a 0x66 prefix.
+def OpSize16     : OperandSize<1>; // Needs 0x66 prefix in 32-bit mode.
+def OpSize32     : OperandSize<2>; // Needs 0x66 prefix in 16-bit mode.
+def OpSizeIgnore : OperandSize<3>; // Takes 0x66 prefix, never emits.
 
 // Address size for encodings that change based on mode.
 class AddressSize<bits<2> val> {
@@ -174,6 +181,7 @@ def AdSize64 : AddressSize<3>; // Encodes a 64-bit address.
 // emitter that various prefix bytes are required.
 class OpSize16 { OperandSize OpSize = OpSize16; }
 class OpSize32 { OperandSize OpSize = OpSize32; }
+class OpSizeIgnore { OperandSize OpSize = OpSizeIgnore; }
 class AdSize16 { AddressSize AdSize = AdSize16; }
 class AdSize32 { AddressSize AdSize = AdSize32; }
 class AdSize64 { AddressSize AdSize = AdSize64; }
@@ -186,6 +194,7 @@ class TA     { Map OpMap = TA; }
 class XOP8   { Map OpMap = XOP8; Prefix OpPrefix = PS; }
 class XOP9   { Map OpMap = XOP9; Prefix OpPrefix = PS; }
 class XOPA   { Map OpMap = XOPA; Prefix OpPrefix = PS; }
+class ThreeDNow { Map OpMap = ThreeDNow; }
 class OBXS   { Prefix OpPrefix = XS; }
 class PS   : TB { Prefix OpPrefix = PS; }
 class PD   : TB { Prefix OpPrefix = PD; }
@@ -199,12 +208,13 @@ class TAPS : TA { Prefix OpPrefix = PS; }
 class TAPD : TA { Prefix OpPrefix = PD; }
 class TAXD : TA { Prefix OpPrefix = XD; }
 class VEX    { Encoding OpEnc = EncVEX; }
-class VEX_W  { bit hasVEX_WPrefix = 1; }
+class VEX_W    { bits<2> VEX_WPrefix = 1; }
+class VEX_WIG  { bits<2> VEX_WPrefix = 2; }
 class VEX_4V : VEX { bit hasVEX_4V = 1; }
 class VEX_L  { bit hasVEX_L = 1; }
 class VEX_LIG { bit ignoresVEX_L = 1; }
-class EVEX : VEX { Encoding OpEnc = EncEVEX; }
-class EVEX_4V : VEX_4V { Encoding OpEnc = EncEVEX; }
+class EVEX   { Encoding OpEnc = EncEVEX; }
+class EVEX_4V : EVEX { bit hasVEX_4V = 1; }
 class EVEX_K { bit hasEVEX_K = 1; }
 class EVEX_KZ : EVEX_K { bit hasEVEX_Z = 1; }
 class EVEX_B { bit hasEVEX_B = 1; }
@@ -212,6 +222,7 @@ class EVEX_RC { bit hasEVEX_RC = 1; }
 class EVEX_V512 { bit hasEVEX_L2 = 1; bit hasVEX_L = 0; }
 class EVEX_V256 { bit hasEVEX_L2 = 0; bit hasVEX_L = 1; }
 class EVEX_V128 { bit hasEVEX_L2 = 0; bit hasVEX_L = 0; }
+class NOTRACK { bit hasNoTrackPrefix = 1; }
 
 // Specify AVX512 8-bit compressed displacement encoding based on the vector
 // element size in bits (8, 16, 32, 64) and the CDisp8 form.
@@ -220,9 +231,17 @@ class EVEX_CD8<int esize, CD8VForm form> {
   bits<3> CD8_Form = form.Value;
 }
 
-class Has3DNow0F0FOpcode  { bit has3DNow0F0FOpcode = 1; }
 class XOP { Encoding OpEnc = EncXOP; }
 class XOP_4V : XOP { bit hasVEX_4V = 1; }
+
+// Specify the alternative register form instruction to replace the current
+// instruction in case it was picked during generation of memory folding tables
+class FoldGenData<string _RegisterForm> {
+    string FoldGenRegForm = _RegisterForm;
+}
+
+// Mark the instruction as "illegal to memory fold/unfold"
+class NotMemoryFoldable { bit isMemoryFoldable = 0; }
 
 class X86Inst<bits<8> opcod, Format f, ImmType i, dag outs, dag ins,
               string AsmStr,
@@ -270,7 +289,7 @@ class X86Inst<bits<8> opcod, Format f, ImmType i, dag outs, dag ins,
   bit hasREPPrefix = 0;     // Does this inst have a REP prefix?
   Encoding OpEnc = EncNormal; // Encoding used by this instruction
   bits<2> OpEncBits = OpEnc.Value;
-  bit hasVEX_WPrefix = 0;   // Does this inst set the VEX_W field?
+  bits<2> VEX_WPrefix = 0;  // Does this inst set the VEX_W field?
   bit hasVEX_4V = 0;        // Does this inst require the VEX.VVVV field?
   bit hasVEX_L = 0;         // Does this inst use large (256-bit) registers?
   bit ignoresVEX_L = 0;     // Does this instruction ignore the L-bit
@@ -282,8 +301,8 @@ class X86Inst<bits<8> opcod, Format f, ImmType i, dag outs, dag ins,
   // Declare it int rather than bits<4> so that all bits are defined when
   // assigning to bits<7>.
   int CD8_EltSize = 0;      // Compressed disp8 form - element-size in bytes.
-  bit has3DNow0F0FOpcode =0;// Wacky 3dNow! encoding?
   bit hasEVEX_RC = 0;       // Explicitly specified rounding control in FP instruction.
+  bit hasNoTrackPrefix = 0; // Does this inst has 0x3E (NoTrack) prefix?
 
   bits<2> EVEX_LL;
   let EVEX_LL{0} = hasVEX_L;
@@ -303,35 +322,44 @@ class X86Inst<bits<8> opcod, Format f, ImmType i, dag outs, dag ins,
                                      CD8_EltSize,
                                      !srl(VectSize, CD8_Form{1-0}))), 0);
 
+  // Used in the memory folding generation (TableGen backend) to point to an alternative
+  // instruction to replace the current one in case it got picked during generation.
+  string FoldGenRegForm = ?;
+
+  bit isMemoryFoldable = 1;     // Is it allowed to memory fold/unfold this instruction?
+
   // TSFlags layout should be kept in sync with X86BaseInfo.h.
   let TSFlags{6-0}   = FormBits;
   let TSFlags{8-7}   = OpSizeBits;
   let TSFlags{10-9}  = AdSizeBits;
-  let TSFlags{13-11} = OpPrefixBits;
-  let TSFlags{16-14} = OpMapBits;
-  let TSFlags{17}    = hasREX_WPrefix;
-  let TSFlags{21-18} = ImmT.Value;
-  let TSFlags{24-22} = FPForm.Value;
-  let TSFlags{25}    = hasLockPrefix;
-  let TSFlags{26}    = hasREPPrefix;
-  let TSFlags{28-27} = ExeDomain.Value;
-  let TSFlags{30-29} = OpEncBits;
-  let TSFlags{38-31} = Opcode;
-  let TSFlags{39}    = hasVEX_WPrefix;
-  let TSFlags{40}    = hasVEX_4V;
-  let TSFlags{41}    = hasVEX_L;
-  let TSFlags{42}    = hasEVEX_K;
-  let TSFlags{43}    = hasEVEX_Z;
-  let TSFlags{44}    = hasEVEX_L2;
-  let TSFlags{45}    = hasEVEX_B;
+  // No need for 3rd bit, we don't need to distinguish NoPrfx from PS.
+  let TSFlags{12-11} = OpPrefixBits{1-0};
+  let TSFlags{15-13} = OpMapBits;
+  let TSFlags{16}    = hasREX_WPrefix;
+  let TSFlags{20-17} = ImmT.Value;
+  let TSFlags{23-21} = FPForm.Value;
+  let TSFlags{24}    = hasLockPrefix;
+  let TSFlags{25}    = hasREPPrefix;
+  let TSFlags{27-26} = ExeDomain.Value;
+  let TSFlags{29-28} = OpEncBits;
+  let TSFlags{37-30} = Opcode;
+  // Currently no need for second bit in TSFlags - W Ignore is equivalent to 0.
+  let TSFlags{38}    = VEX_WPrefix{0};
+  let TSFlags{39}    = hasVEX_4V;
+  let TSFlags{40}    = hasVEX_L;
+  let TSFlags{41}    = hasEVEX_K;
+  let TSFlags{42}    = hasEVEX_Z;
+  let TSFlags{43}    = hasEVEX_L2;
+  let TSFlags{44}    = hasEVEX_B;
   // If we run out of TSFlags bits, it's possible to encode this in 3 bits.
-  let TSFlags{52-46} = CD8_Scale;
-  let TSFlags{53}    = has3DNow0F0FOpcode;
-  let TSFlags{54}    = hasEVEX_RC;
+  let TSFlags{51-45} = CD8_Scale;
+  let TSFlags{52}    = hasEVEX_RC;
+  let TSFlags{53}    = hasNoTrackPrefix;
 }
 
-class PseudoI<dag oops, dag iops, list<dag> pattern>
-  : X86Inst<0, Pseudo, NoImm, oops, iops, "", NoItinerary> {
+class PseudoI<dag oops, dag iops, list<dag> pattern,
+              InstrItinClass itin = NoItinerary>
+  : X86Inst<0, Pseudo, NoImm, oops, iops, "", itin> {
   let Pattern = pattern;
 }
 
@@ -381,6 +409,13 @@ class Ii32S<bits<8> o, Format f, dag outs, dag ins, string asm,
   let CodeSize = 3;
 }
 
+class Ii64<bits<8> o, Format f, dag outs, dag ins, string asm,
+           list<dag> pattern, InstrItinClass itin = NoItinerary>
+  : X86Inst<o, f, Imm64, outs, ins, asm, itin> {
+  let Pattern = pattern;
+  let CodeSize = 3;
+}
+
 class Ii16PCRel<bits<8> o, Format f, dag outs, dag ins, string asm,
            list<dag> pattern, InstrItinClass itin = NoItinerary>
            : X86Inst<o, f, Imm16PCRel, outs, ins, asm, itin> {
@@ -404,9 +439,8 @@ class FPI<bits<8> o, Format F, dag outs, dag ins, string asm,
 // FpI_ - Floating Point Pseudo Instruction template. Not Predicated.
 class FpI_<dag outs, dag ins, FPFormat fp, list<dag> pattern,
            InstrItinClass itin = NoItinerary>
-  : X86Inst<0, Pseudo, NoImm, outs, ins, "", itin> {
+  : PseudoI<outs, ins, pattern, itin> {
   let FPForm = fp;
-  let Pattern = pattern;
 }
 
 // Templates for instructions that use a 16- or 32-bit segmented address as
@@ -453,7 +487,7 @@ class SI_Int<bits<8> o, Format F, dag outs, dag ins, string asm,
          Domain d = GenericDomain>
       : I<o, F, outs, ins, asm, pattern, itin, d> {
   let Predicates = !if(!eq(OpEnc.Value, EncEVEX.Value), [HasAVX512],
-                   !if(!eq(OpEnc.Value, EncVEX.Value), [HasAVX],
+                   !if(!eq(OpEnc.Value, EncVEX.Value), [UseAVX],
                    !if(!eq(OpPrefix.Value, XS.Value), [UseSSE1],
                    !if(!eq(OpPrefix.Value, XD.Value), [UseSSE2],
                    !if(!eq(OpPrefix.Value, PD.Value), [UseSSE2],
@@ -610,7 +644,7 @@ class MMXSDIi8<bits<8> o, Format F, dag outs, dag ins, string asm,
       : Ii8<o, F, outs, ins, asm, pattern, itin>, XD, Requires<[HasSSE2]>;
 class MMXS2SIi8<bits<8> o, Format F, dag outs, dag ins, string asm,
                 list<dag> pattern, InstrItinClass itin = NoItinerary>
-      : Ii8<o, F, outs, ins, asm, pattern>, XS, Requires<[HasSSE2]>;
+      : Ii8<o, F, outs, ins, asm, pattern, itin>, XS, Requires<[HasSSE2]>;
 
 // SSE3 Instruction Templates:
 //
@@ -810,7 +844,7 @@ class AVX512PIi8<bits<8> o, Format F, dag outs, dag ins, string asm,
 class AVX512PI<bits<8> o, Format F, dag outs, dag ins, string asm,
               list<dag> pattern, Domain d, InstrItinClass itin = NoItinerary>
       : I<o, F, outs, ins, asm, pattern, itin, d>, Requires<[HasAVX512]>;
-class AVX512FMA3<bits<8> o, Format F, dag outs, dag ins, string asm,
+class AVX512FMA3S<bits<8> o, Format F, dag outs, dag ins, string asm,
            list<dag>pattern, InstrItinClass itin = NoItinerary>
       : I<o, F, outs, ins, asm, pattern, itin>, T8PD,
         EVEX_4V, Requires<[HasAVX512]>;
@@ -827,33 +861,43 @@ class AVX512<bits<8> o, Format F, dag outs, dag ins, string asm,
 class AES8I<bits<8> o, Format F, dag outs, dag ins, string asm,
             list<dag>pattern, InstrItinClass itin = IIC_AES>
       : I<o, F, outs, ins, asm, pattern, itin, SSEPackedInt>, T8PD,
-        Requires<[HasAES]>;
+        Requires<[NoAVX, HasAES]>;
 
 class AESAI<bits<8> o, Format F, dag outs, dag ins, string asm,
             list<dag> pattern, InstrItinClass itin = NoItinerary>
       : Ii8<o, F, outs, ins, asm, pattern, itin, SSEPackedInt>, TAPD,
-        Requires<[HasAES]>;
+        Requires<[NoAVX, HasAES]>;
 
 // PCLMUL Instruction Templates
 class PCLMULIi8<bits<8> o, Format F, dag outs, dag ins, string asm,
                list<dag>pattern, InstrItinClass itin = NoItinerary>
-      : Ii8<o, F, outs, ins, asm, pattern, itin, SSEPackedInt>, TAPD,
-        Requires<[HasPCLMUL]>;
-
-class AVXPCLMULIi8<bits<8> o, Format F, dag outs, dag ins, string asm,
-                  list<dag>pattern, InstrItinClass itin = NoItinerary>
-      : Ii8<o, F, outs, ins, asm, pattern, itin, SSEPackedInt>, TAPD,
-        VEX_4V, Requires<[HasAVX, HasPCLMUL]>;
+      : Ii8<o, F, outs, ins, asm, pattern, itin, SSEPackedInt>, TAPD;
 
 // FMA3 Instruction Templates
 class FMA3<bits<8> o, Format F, dag outs, dag ins, string asm,
            list<dag>pattern, InstrItinClass itin = NoItinerary>
       : I<o, F, outs, ins, asm, pattern, itin>, T8PD,
-        VEX_4V, FMASC, Requires<[HasFMA, NoVLX]>;
+        VEX_4V, FMASC, Requires<[HasFMA, NoFMA4, NoVLX]>;
+class FMA3S<bits<8> o, Format F, dag outs, dag ins, string asm,
+            list<dag>pattern, InstrItinClass itin = NoItinerary>
+      : I<o, F, outs, ins, asm, pattern, itin>, T8PD,
+        VEX_4V, FMASC, Requires<[HasFMA, NoFMA4, NoAVX512]>;
+class FMA3S_Int<bits<8> o, Format F, dag outs, dag ins, string asm,
+                list<dag>pattern, InstrItinClass itin = NoItinerary>
+      : I<o, F, outs, ins, asm, pattern, itin>, T8PD,
+        VEX_4V, FMASC, Requires<[HasFMA, NoAVX512]>;
 
 // FMA4 Instruction Templates
 class FMA4<bits<8> o, Format F, dag outs, dag ins, string asm,
            list<dag>pattern, InstrItinClass itin = NoItinerary>
+      : Ii8Reg<o, F, outs, ins, asm, pattern, itin>, TAPD,
+        VEX_4V, FMASC, Requires<[HasFMA4, NoVLX]>;
+class FMA4S<bits<8> o, Format F, dag outs, dag ins, string asm,
+            list<dag>pattern, InstrItinClass itin = NoItinerary>
+      : Ii8Reg<o, F, outs, ins, asm, pattern, itin>, TAPD,
+        VEX_4V, FMASC, Requires<[HasFMA4, NoAVX512]>;
+class FMA4S_Int<bits<8> o, Format F, dag outs, dag ins, string asm,
+                list<dag>pattern, InstrItinClass itin = NoItinerary>
       : Ii8Reg<o, F, outs, ins, asm, pattern, itin>, TAPD,
         VEX_4V, FMASC, Requires<[HasFMA4]>;
 
@@ -898,20 +942,9 @@ class RIi32 <bits<8> o, Format F, dag outs, dag ins, string asm,
 class RIi32S <bits<8> o, Format F, dag outs, dag ins, string asm,
               list<dag> pattern, InstrItinClass itin = NoItinerary>
       : Ii32S<o, F, outs, ins, asm, pattern, itin>, REX_W;
-
-class RIi64<bits<8> o, Format f, dag outs, dag ins, string asm,
+class RIi64<bits<8> o, Format F, dag outs, dag ins, string asm,
             list<dag> pattern, InstrItinClass itin = NoItinerary>
-  : X86Inst<o, f, Imm64, outs, ins, asm, itin>, REX_W {
-  let Pattern = pattern;
-  let CodeSize = 3;
-}
-
-class RIi64_NOREX<bits<8> o, Format f, dag outs, dag ins, string asm,
-            list<dag> pattern, InstrItinClass itin = NoItinerary>
-  : X86Inst<o, f, Imm64, outs, ins, asm, itin> {
-  let Pattern = pattern;
-  let CodeSize = 3;
-}
+      : Ii64<o, F, outs, ins, asm, pattern, itin>, REX_W;
 
 class RS2I<bits<8> o, Format F, dag outs, dag ins, string asm,
            list<dag> pattern, InstrItinClass itin = NoItinerary>

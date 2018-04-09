@@ -10,7 +10,8 @@
 //===----------------------------------------------------------------------===//
 // Type profiles
 //===----------------------------------------------------------------------===//
-def SDT_CallSeqStart        : SDCallSeqStart<[SDTCisVT<0, i64>]>;
+def SDT_CallSeqStart        : SDCallSeqStart<[SDTCisVT<0, i64>,
+                                              SDTCisVT<1, i64>]>;
 def SDT_CallSeqEnd          : SDCallSeqEnd<[SDTCisVT<0, i64>,
                                             SDTCisVT<1, i64>]>;
 def SDT_ZCall               : SDTypeProfile<0, -1, [SDTCisPtrTy<0>]>;
@@ -35,17 +36,10 @@ def SDT_ZWrapOffset         : SDTypeProfile<1, 2,
                                              SDTCisSameAs<0, 2>,
                                              SDTCisPtrTy<0>]>;
 def SDT_ZAdjDynAlloc        : SDTypeProfile<1, 0, [SDTCisVT<0, i64>]>;
-def SDT_ZExtractAccess      : SDTypeProfile<1, 1,
-                                            [SDTCisVT<0, i32>,
-                                             SDTCisVT<1, i32>]>;
-def SDT_ZGR128Binary32      : SDTypeProfile<1, 2,
+def SDT_ZGR128Binary        : SDTypeProfile<1, 2,
                                             [SDTCisVT<0, untyped>,
-                                             SDTCisVT<1, untyped>,
-                                             SDTCisVT<2, i32>]>;
-def SDT_ZGR128Binary64      : SDTypeProfile<1, 2,
-                                            [SDTCisVT<0, untyped>,
-                                             SDTCisVT<1, untyped>,
-                                             SDTCisVT<2, i64>]>;
+                                             SDTCisInt<1>,
+                                             SDTCisInt<2>]>;
 def SDT_ZAtomicLoadBinaryW  : SDTypeProfile<1, 5,
                                             [SDTCisVT<0, i32>,
                                              SDTCisPtrTy<1>,
@@ -61,6 +55,22 @@ def SDT_ZAtomicCmpSwapW     : SDTypeProfile<1, 6,
                                              SDTCisVT<4, i32>,
                                              SDTCisVT<5, i32>,
                                              SDTCisVT<6, i32>]>;
+def SDT_ZAtomicCmpSwap      : SDTypeProfile<1, 3,
+                                            [SDTCisInt<0>,
+                                             SDTCisPtrTy<1>,
+                                             SDTCisSameAs<0, 2>,
+                                             SDTCisSameAs<0, 3>]>;
+def SDT_ZAtomicLoad128      : SDTypeProfile<1, 1,
+                                            [SDTCisVT<0, untyped>,
+                                             SDTCisPtrTy<1>]>;
+def SDT_ZAtomicStore128     : SDTypeProfile<0, 2,
+                                            [SDTCisVT<0, untyped>,
+                                             SDTCisPtrTy<1>]>;
+def SDT_ZAtomicCmpSwap128   : SDTypeProfile<1, 3,
+                                            [SDTCisVT<0, untyped>,
+                                             SDTCisPtrTy<1>,
+                                             SDTCisVT<2, untyped>,
+                                             SDTCisVT<3, untyped>]>;
 def SDT_ZMemMemLength       : SDTypeProfile<0, 3,
                                             [SDTCisPtrTy<0>,
                                              SDTCisPtrTy<1>,
@@ -186,17 +196,12 @@ def z_br_ccmask         : SDNode<"SystemZISD::BR_CCMASK", SDT_ZBRCCMask,
 def z_select_ccmask     : SDNode<"SystemZISD::SELECT_CCMASK", SDT_ZSelectCCMask,
     		                 [SDNPInGlue]>;
 def z_adjdynalloc       : SDNode<"SystemZISD::ADJDYNALLOC", SDT_ZAdjDynAlloc>;
-def z_extract_access    : SDNode<"SystemZISD::EXTRACT_ACCESS",
-                                 SDT_ZExtractAccess>;
 def z_popcnt            : SDNode<"SystemZISD::POPCNT", SDTIntUnaryOp>;
-def z_umul_lohi64       : SDNode<"SystemZISD::UMUL_LOHI64", SDT_ZGR128Binary64>;
-def z_sdivrem32         : SDNode<"SystemZISD::SDIVREM32", SDT_ZGR128Binary32>;
-def z_sdivrem64         : SDNode<"SystemZISD::SDIVREM64", SDT_ZGR128Binary64>;
-def z_udivrem32         : SDNode<"SystemZISD::UDIVREM32", SDT_ZGR128Binary32>;
-def z_udivrem64         : SDNode<"SystemZISD::UDIVREM64", SDT_ZGR128Binary64>;
+def z_smul_lohi         : SDNode<"SystemZISD::SMUL_LOHI", SDT_ZGR128Binary>;
+def z_umul_lohi         : SDNode<"SystemZISD::UMUL_LOHI", SDT_ZGR128Binary>;
+def z_sdivrem           : SDNode<"SystemZISD::SDIVREM", SDT_ZGR128Binary>;
+def z_udivrem           : SDNode<"SystemZISD::UDIVREM", SDT_ZGR128Binary>;
 
-def z_serialize         : SDNode<"SystemZISD::SERIALIZE", SDTNone,
-                                 [SDNPHasChain, SDNPMayStore]>;
 def z_membarrier        : SDNode<"SystemZISD::MEMBARRIER", SDTNone,
                                  [SDNPHasChain, SDNPSideEffect]>;
 
@@ -296,7 +301,26 @@ def z_atomic_loadw_min  : AtomicWOp<"ATOMIC_LOADW_MIN">;
 def z_atomic_loadw_max  : AtomicWOp<"ATOMIC_LOADW_MAX">;
 def z_atomic_loadw_umin : AtomicWOp<"ATOMIC_LOADW_UMIN">;
 def z_atomic_loadw_umax : AtomicWOp<"ATOMIC_LOADW_UMAX">;
-def z_atomic_cmp_swapw  : AtomicWOp<"ATOMIC_CMP_SWAPW", SDT_ZAtomicCmpSwapW>;
+
+def z_atomic_cmp_swap   : SDNode<"SystemZISD::ATOMIC_CMP_SWAP",
+                                 SDT_ZAtomicCmpSwap,
+                                 [SDNPHasChain, SDNPMayStore, SDNPMayLoad,
+                                  SDNPOutGlue, SDNPMemOperand]>;
+def z_atomic_cmp_swapw  : SDNode<"SystemZISD::ATOMIC_CMP_SWAPW",
+                                 SDT_ZAtomicCmpSwapW,
+                                 [SDNPHasChain, SDNPMayStore, SDNPMayLoad,
+                                  SDNPOutGlue, SDNPMemOperand]>;
+
+def z_atomic_load_128   : SDNode<"SystemZISD::ATOMIC_LOAD_128",
+                                 SDT_ZAtomicLoad128,
+                                 [SDNPHasChain, SDNPMayLoad, SDNPMemOperand]>;
+def z_atomic_store_128  : SDNode<"SystemZISD::ATOMIC_STORE_128",
+                                 SDT_ZAtomicStore128,
+                                 [SDNPHasChain, SDNPMayStore, SDNPMemOperand]>;
+def z_atomic_cmp_swap_128 : SDNode<"SystemZISD::ATOMIC_CMP_SWAP_128",
+                                   SDT_ZAtomicCmpSwap128,
+                                   [SDNPHasChain, SDNPMayStore, SDNPMayLoad,
+                                    SDNPOutGlue, SDNPMemOperand]>;
 
 def z_mvc               : SDNode<"SystemZISD::MVC", SDT_ZMemMemLength,
                                  [SDNPHasChain, SDNPMayStore, SDNPMayLoad]>;
@@ -561,6 +585,12 @@ def z_fma : PatFrag<(ops node:$src1, node:$src2, node:$src3),
 def z_fms : PatFrag<(ops node:$src1, node:$src2, node:$src3),
                     (fma node:$src2, node:$src3, (fneg node:$src1))>;
 
+// Negative fused multiply-add and multiply-subtract.
+def fnma : PatFrag<(ops node:$src1, node:$src2, node:$src3),
+                   (fneg (fma node:$src1, node:$src2, node:$src3))>;
+def fnms : PatFrag<(ops node:$src1, node:$src2, node:$src3),
+                   (fneg (fms node:$src1, node:$src2, node:$src3))>;
+
 // Floating-point negative absolute.
 def fnabs : PatFrag<(ops node:$ptr), (fneg (fabs node:$ptr))>;
 
@@ -574,6 +604,12 @@ class loadu<SDPatternOperator operator, SDPatternOperator load = load>
 class storeu<SDPatternOperator operator, SDPatternOperator store = store>
   : PatFrag<(ops node:$value, node:$addr),
             (store (operator node:$value), node:$addr)>;
+
+// Create a store operator that performs the given inherent operation
+// and stores the resulting value.
+class storei<SDPatternOperator operator, SDPatternOperator store = store>
+  : PatFrag<(ops node:$addr),
+            (store (operator), node:$addr)>;
 
 // Vector representation of all-zeros and all-ones.
 def z_vzero : PatFrag<(ops), (bitconvert (v16i8 (z_byte_mask (i32 0))))>;
@@ -629,6 +665,19 @@ def z_vllezf64 : PatFrag<(ops node:$addr),
                          (z_merge_high
                           (scalar_to_vector (f64 (load node:$addr))),
                           (z_vzero))>;
+
+// Similarly for the high element of a zeroed vector.
+def z_vllezli32 : z_vllez<i32, load, 0>;
+def z_vllezlf32 : PatFrag<(ops node:$addr),
+                          (bitconvert
+                           (z_merge_high
+                            (v2i64
+                             (bitconvert
+                              (z_merge_high
+                               (v4f32 (scalar_to_vector
+                                       (f32 (load node:$addr)))),
+                               (v4f32 (z_vzero))))),
+                            (v2i64 (z_vzero))))>;
 
 // Store one element of a vector.
 class z_vste<ValueType scalartype, SDPatternOperator store>

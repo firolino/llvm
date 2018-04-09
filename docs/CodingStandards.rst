@@ -34,10 +34,10 @@ There are some conventions that are not uniformly followed in the code base
 (e.g. the naming convention).  This is because they are relatively new, and a
 lot of code was written before they were put in place.  Our long term goal is
 for the entire codebase to follow the convention, but we explicitly *do not*
-want patches that do large-scale reformating of existing code.  On the other
+want patches that do large-scale reformatting of existing code.  On the other
 hand, it is reasonable to rename the methods of a class if you're about to
-change it in some other way.  Just do the reformating as a separate commit from
-the functionality change.
+change it in some other way.  Just do the reformatting as a separate commit
+from the functionality change.
   
 The ultimate goal of these guidelines is to increase the readability and
 maintainability of our common source base. If you have suggestions for topics to
@@ -131,9 +131,8 @@ unlikely to be supported by our host compilers.
 * Delegating constructors: N1986_
 * Default member initializers (non-static data member initializers): N2756_
 
-  * Only use these for scalar members that would otherwise be left
-    uninitialized. Non-scalar members generally have appropriate default
-    constructors.
+  * Feel free to use these wherever they make sense and where the `=`
+    syntax is allowed. Don't use braced initialization syntax.
 
 .. _N2118: http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2006/n2118.html
 .. _N2439: http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2007/n2439.htm
@@ -204,7 +203,7 @@ this means are `Effective Go`_ and `Go Code Review Comments`_.
   https://golang.org/doc/effective_go.html
 
 .. _Go Code Review Comments:
-  https://code.google.com/p/go-wiki/wiki/CodeReviewComments
+  https://github.com/golang/go/wiki/CodeReviewComments
 
 Mechanical Source Issues
 ========================
@@ -812,33 +811,75 @@ As a rule of thumb, use ``auto &`` unless you need to copy the result, and use
   for (const auto *Ptr : Container) { observe(*Ptr); }
   for (auto *Ptr : Container) { Ptr->change(); }
 
+Beware of non-determinism due to ordering of pointers
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+In general, there is no relative ordering among pointers. As a result,
+when unordered containers like sets and maps are used with pointer keys
+the iteration order is undefined. Hence, iterating such containers may
+result in non-deterministic code generation. While the generated code
+might not necessarily be "wrong code", this non-determinism might result
+in unexpected runtime crashes or simply hard to reproduce bugs on the
+customer side making it harder to debug and fix.
+
+As a rule of thumb, in case an ordered result is expected, remember to
+sort an unordered container before iteration. Or use ordered containers
+like vector/MapVector/SetVector if you want to iterate pointer keys.
+
 Style Issues
 ============
 
 The High-Level Issues
 ---------------------
 
-A Public Header File **is** a Module
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+Self-contained Headers
+^^^^^^^^^^^^^^^^^^^^^^
 
-C++ doesn't do too well in the modularity department.  There is no real
-encapsulation or data hiding (unless you use expensive protocol classes), but it
-is what we have to work with.  When you write a public header file (in the LLVM
-source tree, they live in the top level "``include``" directory), you are
-defining a module of functionality.
+Header files should be self-contained (compile on their own) and end in .h.
+Non-header files that are meant for inclusion should end in .inc and be used
+sparingly.
 
-Ideally, modules should be completely independent of each other, and their
-header files should only ``#include`` the absolute minimum number of headers
-possible. A module is not just a class, a function, or a namespace: it's a
-collection of these that defines an interface.  This interface may be several
-functions, classes, or data structures, but the important issue is how they work
-together.
+All header files should be self-contained. Users and refactoring tools should
+not have to adhere to special conditions to include the header. Specifically, a
+header should have header guards and include all other headers it needs.
 
-In general, a module should be implemented by one or more ``.cpp`` files.  Each
+There are rare cases where a file designed to be included is not
+self-contained. These are typically intended to be included at unusual
+locations, such as the middle of another file. They might not use header
+guards, and might not include their prerequisites. Name such files with the
+.inc extension. Use sparingly, and prefer self-contained headers when possible.
+
+In general, a header should be implemented by one or more ``.cpp`` files.  Each
 of these ``.cpp`` files should include the header that defines their interface
-first.  This ensures that all of the dependences of the module header have been
-properly added to the module header itself, and are not implicit.  System
-headers should be included after user headers for a translation unit.
+first.  This ensures that all of the dependences of the header have been
+properly added to the header itself, and are not implicit.  System headers
+should be included after user headers for a translation unit.
+
+Library Layering
+^^^^^^^^^^^^^^^^
+
+A directory of header files (for example ``include/llvm/Foo``) defines a
+library (``Foo``). Dependencies between libraries are defined by the
+``LLVMBuild.txt`` file in their implementation (``lib/Foo``). One library (both
+its headers and implementation) should only use things from the libraries
+listed in its dependencies.
+
+Some of this constraint can be enforced by classic Unix linkers (Mac & Windows
+linkers, as well as lld, do not enforce this constraint). A Unix linker
+searches left to right through the libraries specified on its command line and
+never revisits a library. In this way, no circular dependencies between
+libraries can exist.
+
+This doesn't fully enforce all inter-library dependencies, and importantly
+doesn't enforce header file circular dependencies created by inline functions.
+A good way to answer the "is this layered correctly" would be to consider
+whether a Unix linker would succeed at linking the program if all inline
+functions were defined out-of-line. (& for all valid orderings of dependencies
+- since linking resolution is linear, it's possible that some implicit
+dependencies can sneak through: A depends on B and C, so valid orderings are
+"C B A" or "B C A", in both cases the explicit dependencies come before their
+use. But in the first case, B could still link successfully if it implicitly
+depended on C, or the opposite in the second case)
 
 .. _minimal list of #includes:
 
@@ -942,8 +983,8 @@ loops.  A silly example is something like this:
 
 .. code-block:: c++
 
-  for (BasicBlock::iterator II = BB->begin(), E = BB->end(); II != E; ++II) {
-    if (BinaryOperator *BO = dyn_cast<BinaryOperator>(II)) {
+  for (Instruction &I : BB) {
+    if (auto *BO = dyn_cast<BinaryOperator>(&I)) {
       Value *LHS = BO->getOperand(0);
       Value *RHS = BO->getOperand(1);
       if (LHS != RHS) {
@@ -962,8 +1003,8 @@ It is strongly preferred to structure the loop like this:
 
 .. code-block:: c++
 
-  for (BasicBlock::iterator II = BB->begin(), E = BB->end(); II != E; ++II) {
-    BinaryOperator *BO = dyn_cast<BinaryOperator>(II);
+  for (Instruction &I : BB) {
+    auto *BO = dyn_cast<BinaryOperator>(&I);
     if (!BO) continue;
 
     Value *LHS = BO->getOperand(0);
@@ -1233,6 +1274,12 @@ builds), ``llvm_unreachable`` becomes a hint to compilers to skip generating
 code for this branch. If the compiler does not support this, it will fall back
 to the "abort" implementation.
 
+Neither assertions or ``llvm_unreachable`` will abort the program on a release
+build. If the error condition can be triggered by user input then the
+recoverable error mechanism described in :doc:`ProgrammersManual` should be
+used instead. In cases where this is not practical, ``report_fatal_error`` may
+be used.
+
 Another issue is that values used only by assertions will produce an "unused
 value" warning when assertions are disabled.  For example, this code will warn:
 
@@ -1317,19 +1364,31 @@ that the enum expression may take any representable value, not just those of
 individual enumerators. To suppress this warning, use ``llvm_unreachable`` after
 the switch.
 
-Don't evaluate ``end()`` every time through a loop
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+Use range-based ``for`` loops wherever possible
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-Because C++ doesn't have a standard "``foreach``" loop (though it can be
-emulated with macros and may be coming in C++'0x) we end up writing a lot of
-loops that manually iterate from begin to end on a variety of containers or
-through other data structures.  One common mistake is to write a loop in this
-style:
+The introduction of range-based ``for`` loops in C++11 means that explicit
+manipulation of iterators is rarely necessary. We use range-based ``for``
+loops wherever possible for all newly added code. For example:
 
 .. code-block:: c++
 
   BasicBlock *BB = ...
-  for (BasicBlock::iterator I = BB->begin(); I != BB->end(); ++I)
+  for (Instruction &I : *BB)
+    ... use I ...
+
+Don't evaluate ``end()`` every time through a loop
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+In cases where range-based ``for`` loops can't be used and it is necessary
+to write an explicit iterator-based loop, pay close attention to whether
+``end()`` is re-evaluted on each loop iteration. One common mistake is to
+write a loop in this style:
+
+.. code-block:: c++
+
+  BasicBlock *BB = ...
+  for (auto I = BB->begin(); I != BB->end(); ++I)
     ... use I ...
 
 The problem with this construct is that it evaluates "``BB->end()``" every time
@@ -1340,7 +1399,7 @@ convenient way to do this is like so:
 .. code-block:: c++
 
   BasicBlock *BB = ...
-  for (BasicBlock::iterator I = BB->begin(), E = BB->end(); I != E; ++I)
+  for (auto I = BB->begin(), E = BB->end(); I != E; ++I)
     ... use I ...
 
 The observant may quickly point out that these two loops may have different

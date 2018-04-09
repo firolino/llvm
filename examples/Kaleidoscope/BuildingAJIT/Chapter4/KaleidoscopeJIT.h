@@ -1,4 +1,4 @@
-//===----- KaleidoscopeJIT.h - A simple JIT for Kaleidoscope ----*- C++ -*-===//
+//===- KaleidoscopeJIT.h - A simple JIT for Kaleidoscope --------*- C++ -*-===//
 //
 //                     The LLVM Compiler Infrastructure
 //
@@ -17,20 +17,27 @@
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ExecutionEngine/ExecutionEngine.h"
 #include "llvm/ExecutionEngine/JITSymbol.h"
-#include "llvm/ExecutionEngine/RuntimeDyld.h"
-#include "llvm/ExecutionEngine/SectionMemoryManager.h"
-#include "llvm/ExecutionEngine/Orc/CompileOnDemandLayer.h"
 #include "llvm/ExecutionEngine/Orc/CompileUtils.h"
 #include "llvm/ExecutionEngine/Orc/IRCompileLayer.h"
 #include "llvm/ExecutionEngine/Orc/IRTransformLayer.h"
+#include "llvm/ExecutionEngine/Orc/IndirectionUtils.h"
 #include "llvm/ExecutionEngine/Orc/LambdaResolver.h"
-#include "llvm/ExecutionEngine/Orc/ObjectLinkingLayer.h"
+#include "llvm/ExecutionEngine/Orc/RTDyldObjectLinkingLayer.h"
+#include "llvm/ExecutionEngine/RTDyldMemoryManager.h"
+#include "llvm/ExecutionEngine/SectionMemoryManager.h"
 #include "llvm/IR/DataLayout.h"
+#include "llvm/IR/LegacyPassManager.h"
 #include "llvm/IR/Mangler.h"
 #include "llvm/Support/DynamicLibrary.h"
+#include "llvm/Support/Error.h"
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/Target/TargetMachine.h"
+#include "llvm/Transforms/Scalar.h"
+#include "llvm/Transforms/Scalar/GVN.h"
 #include <algorithm>
+#include <cassert>
+#include <cstdlib>
+#include <map>
 #include <memory>
 #include <string>
 #include <vector>
@@ -47,6 +54,7 @@ public:
   FunctionAST(std::unique_ptr<PrototypeAST> Proto,
               std::unique_ptr<ExprAST> Body)
       : Proto(std::move(Proto)), Body(std::move(Body)) {}
+
   const PrototypeAST& getProto() const;
   const std::string& getName() const;
   llvm::Function *codegen();
@@ -64,13 +72,15 @@ namespace orc {
 
 class KaleidoscopeJIT {
 private:
+  ExecutionSession ES;
+  std::shared_ptr<SymbolResolver> Resolver;
   std::unique_ptr<TargetMachine> TM;
   const DataLayout DL;
-  ObjectLinkingLayer<> ObjectLayer;
-  IRCompileLayer<decltype(ObjectLayer)> CompileLayer;
+  RTDyldObjectLinkingLayer ObjectLayer;
+  IRCompileLayer<decltype(ObjectLayer), SimpleCompiler> CompileLayer;
 
-  typedef std::function<std::unique_ptr<Module>(std::unique_ptr<Module>)>
-    OptimizeFunction;
+  using OptimizeFunction =
+      std::function<std::unique_ptr<Module>(std::unique_ptr<Module>)>;
 
   IRTransformLayer<decltype(CompileLayer), OptimizeFunction> OptimizeLayer;
 
@@ -78,11 +88,27 @@ private:
   std::unique_ptr<IndirectStubsManager> IndirectStubsMgr;
 
 public:
-  typedef decltype(OptimizeLayer)::ModuleSetHandleT ModuleHandle;
-
   KaleidoscopeJIT()
-      : TM(EngineBuilder().selectTarget()),
-        DL(TM->createDataLayout()),
+      : Resolver(createLegacyLookupResolver(
+            [this](const std::string &Name) -> JITSymbol {
+              if (auto Sym = IndirectStubsMgr->findStub(Name, false))
+                return Sym;
+              if (auto Sym = OptimizeLayer.findSymbol(Name, false))
+                return Sym;
+              else if (auto Err = Sym.takeError())
+                return std::move(Err);
+              if (auto SymAddr =
+                      RTDyldMemoryManager::getSymbolAddressInProcess(Name))
+                return JITSymbol(SymAddr, JITSymbolFlags::Exported);
+              return nullptr;
+            },
+            [](Error Err) { cantFail(std::move(Err), "lookupFlags failed"); })),
+        TM(EngineBuilder().selectTarget()), DL(TM->createDataLayout()),
+        ObjectLayer(ES,
+                    [this](VModuleKey K) {
+                      return RTDyldObjectLinkingLayer::Resources{
+                          std::make_shared<SectionMemoryManager>(), Resolver};
+                    }),
         CompileLayer(ObjectLayer, SimpleCompiler(*TM)),
         OptimizeLayer(CompileLayer,
                       [this](std::unique_ptr<Module> M) {
@@ -98,42 +124,17 @@ public:
 
   TargetMachine &getTargetMachine() { return *TM; }
 
-  ModuleHandle addModule(std::unique_ptr<Module> M) {
-
-    // Build our symbol resolver:
-    // Lambda 1: Look back into the JIT itself to find symbols that are part of
-    //           the same "logical dylib".
-    // Lambda 2: Search for external symbols in the host process.
-    auto Resolver = createLambdaResolver(
-        [&](const std::string &Name) {
-          if (auto Sym = IndirectStubsMgr->findStub(Name, false))
-            return Sym;
-          if (auto Sym = OptimizeLayer.findSymbol(Name, false))
-            return Sym;
-          return JITSymbol(nullptr);
-        },
-        [](const std::string &Name) {
-          if (auto SymAddr =
-                RTDyldMemoryManager::getSymbolAddressInProcess(Name))
-            return JITSymbol(SymAddr, JITSymbolFlags::Exported);
-          return JITSymbol(nullptr);
-        });
-
-    // Build a singleton module set to hold our module.
-    std::vector<std::unique_ptr<Module>> Ms;
-    Ms.push_back(std::move(M));
-
-    // Add the set to the JIT with the resolver we created above and a newly
-    // created SectionMemoryManager.
-    return OptimizeLayer.addModuleSet(std::move(Ms),
-                                      make_unique<SectionMemoryManager>(),
-                                      std::move(Resolver));
+  VModuleKey addModule(std::unique_ptr<Module> M) {
+    // Add the module to the JIT with a new VModuleKey.
+    auto K = ES.allocateVModule();
+    cantFail(OptimizeLayer.addModule(K, std::move(M)));
+    return K;
   }
 
   Error addFunctionAST(std::unique_ptr<FunctionAST> FnAST) {
     // Create a CompileCallback - this is the re-entry point into the compiler
     // for functions that haven't been compiled yet.
-    auto CCInfo = CompileCallbackMgr->getCompileCallback();
+    auto CCInfo = cantFail(CompileCallbackMgr->getCompileCallback());
 
     // Create an indirect stub. This serves as the functions "canonical
     // definition" - an unchanging (constant address) entry point to the
@@ -173,7 +174,7 @@ public:
         addModule(std::move(M));
         auto Sym = findSymbol(SharedFnAST->getName() + "$impl");
         assert(Sym && "Couldn't find compiled function?");
-        JITTargetAddress SymAddr = Sym.getAddress();
+        JITTargetAddress SymAddr = cantFail(Sym.getAddress());
         if (auto Err =
               IndirectStubsMgr->updatePointer(mangle(SharedFnAST->getName()),
                                               SymAddr)) {
@@ -192,12 +193,11 @@ public:
     return OptimizeLayer.findSymbol(mangle(Name), true);
   }
 
-  void removeModule(ModuleHandle H) {
-    OptimizeLayer.removeModuleSet(H);
+  void removeModule(VModuleKey K) {
+    cantFail(OptimizeLayer.removeModule(K));
   }
 
 private:
-
   std::string mangle(const std::string &Name) {
     std::string MangledName;
     raw_string_ostream MangledNameStream(MangledName);
@@ -223,7 +223,6 @@ private:
 
     return M;
   }
-
 };
 
 } // end namespace orc

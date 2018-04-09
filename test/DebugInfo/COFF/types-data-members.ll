@@ -37,7 +37,7 @@
 ; $ clang t.cpp -S -emit-llvm -g -gcodeview -o t.ll
 
 ; CHECK: CodeViewTypes [
-; CHECK:   Section: .debug$T (10)
+; CHECK:   Section: .debug$T (8)
 ; CHECK:   Magic: 0x4
 ; CHECK:   ArgList (0x1000) {
 ; CHECK:     TypeLeafKind: LF_ARGLIST (0x1201)
@@ -298,7 +298,7 @@
 ; CHECK:   }
 ; CHECK:   Struct (0x1016) {
 ; CHECK:     TypeLeafKind: LF_STRUCTURE (0x1505)
-; CHECK:     MemberCount: 2
+; CHECK:     MemberCount: 4
 ; CHECK:     Properties [ (0x200)
 ; CHECK:       HasUniqueName (0x200)
 ; CHECK:     ]

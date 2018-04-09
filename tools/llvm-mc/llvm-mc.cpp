@@ -15,6 +15,7 @@
 #include "Disassembler.h"
 #include "llvm/MC/MCAsmBackend.h"
 #include "llvm/MC/MCAsmInfo.h"
+#include "llvm/MC/MCCodeEmitter.h"
 #include "llvm/MC/MCContext.h"
 #include "llvm/MC/MCInstPrinter.h"
 #include "llvm/MC/MCInstrInfo.h"
@@ -22,10 +23,9 @@
 #include "llvm/MC/MCParser/AsmLexer.h"
 #include "llvm/MC/MCParser/MCTargetAsmParser.h"
 #include "llvm/MC/MCRegisterInfo.h"
-#include "llvm/MC/MCSectionMachO.h"
 #include "llvm/MC/MCStreamer.h"
 #include "llvm/MC/MCSubtargetInfo.h"
-#include "llvm/MC/MCTargetOptionsCommandFlags.h"
+#include "llvm/MC/MCTargetOptionsCommandFlags.def"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Compression.h"
 #include "llvm/Support/FileUtilities.h"
@@ -56,17 +56,15 @@ static cl::opt<bool> RelaxELFRel(
     "relax-relocations", cl::init(true),
     cl::desc("Emit R_X86_64_GOTPCRELX instead of R_X86_64_GOTPCREL"));
 
-static cl::opt<DebugCompressionType>
-CompressDebugSections("compress-debug-sections", cl::ValueOptional,
-  cl::init(DebugCompressionType::DCT_None),
-  cl::desc("Choose DWARF debug sections compression:"),
-  cl::values(
-    clEnumValN(DebugCompressionType::DCT_None, "none",
-      "No compression"),
-    clEnumValN(DebugCompressionType::DCT_Zlib, "zlib",
-      "Use zlib compression"),
-    clEnumValN(DebugCompressionType::DCT_ZlibGnu, "zlib-gnu",
-      "Use zlib-gnu compression (deprecated)")));
+static cl::opt<DebugCompressionType> CompressDebugSections(
+    "compress-debug-sections", cl::ValueOptional,
+    cl::init(DebugCompressionType::None),
+    cl::desc("Choose DWARF debug sections compression:"),
+    cl::values(clEnumValN(DebugCompressionType::None, "none", "No compression"),
+               clEnumValN(DebugCompressionType::Z, "zlib",
+                          "Use zlib compression"),
+               clEnumValN(DebugCompressionType::GNU, "zlib-gnu",
+                          "Use zlib-gnu compression (deprecated)")));
 
 static cl::opt<bool>
 ShowInst("show-inst", cl::desc("Show internal instruction representation"));
@@ -133,20 +131,10 @@ MAttrs("mattr",
 static cl::opt<bool> PIC("position-independent",
                          cl::desc("Position independent"), cl::init(false));
 
-static cl::opt<llvm::CodeModel::Model>
-CMModel("code-model",
-        cl::desc("Choose code model"),
-        cl::init(CodeModel::Default),
-        cl::values(clEnumValN(CodeModel::Default, "default",
-                              "Target default code model"),
-                   clEnumValN(CodeModel::Small, "small",
-                              "Small code model"),
-                   clEnumValN(CodeModel::Kernel, "kernel",
-                              "Kernel code model"),
-                   clEnumValN(CodeModel::Medium, "medium",
-                              "Medium code model"),
-                   clEnumValN(CodeModel::Large, "large",
-                              "Large code model")));
+static cl::opt<bool>
+    LargeCodeModel("large-code-model",
+                   cl::desc("Create cfi directives that assume the code might "
+                            "be more than 2gb away"));
 
 static cl::opt<bool>
 NoInitialTextSection("n", cl::desc("Don't assume assembly file starts "
@@ -209,13 +197,13 @@ static const Target *GetTarget(const char *ProgName) {
   return TheTarget;
 }
 
-static std::unique_ptr<tool_output_file> GetOutputStream() {
+static std::unique_ptr<ToolOutputFile> GetOutputStream() {
   if (OutputFilename == "")
     OutputFilename = "-";
 
   std::error_code EC;
-  auto Out = llvm::make_unique<tool_output_file>(OutputFilename, EC,
-                                                 sys::fs::F_None);
+  auto Out =
+      llvm::make_unique<ToolOutputFile>(OutputFilename, EC, sys::fs::F_None);
   if (EC) {
     errs() << EC.message() << '\n';
     return nullptr;
@@ -250,165 +238,31 @@ static int AsLexInput(SourceMgr &SrcMgr, MCAsmInfo &MAI,
 
   bool Error = false;
   while (Lexer.Lex().isNot(AsmToken::Eof)) {
-    const AsmToken &Tok = Lexer.getTok();
-
-    switch (Tok.getKind()) {
-    default:
-      SrcMgr.PrintMessage(Lexer.getLoc(), SourceMgr::DK_Warning,
-                          "unknown token");
+    Lexer.getTok().dump(OS);
+    OS << "\n";
+    if (Lexer.getTok().getKind() == AsmToken::Error)
       Error = true;
-      break;
-    case AsmToken::Error:
-      Error = true; // error already printed.
-      break;
-    case AsmToken::Identifier:
-      OS << "identifier: " << Lexer.getTok().getString();
-      break;
-    case AsmToken::Integer:
-      OS << "int: " << Lexer.getTok().getString();
-      break;
-    case AsmToken::Real:
-      OS << "real: " << Lexer.getTok().getString();
-      break;
-    case AsmToken::String:
-      OS << "string: " << Lexer.getTok().getString();
-      break;
-
-    case AsmToken::Amp:            OS << "Amp"; break;
-    case AsmToken::AmpAmp:         OS << "AmpAmp"; break;
-    case AsmToken::At:             OS << "At"; break;
-    case AsmToken::Caret:          OS << "Caret"; break;
-    case AsmToken::Colon:          OS << "Colon"; break;
-    case AsmToken::Comma:          OS << "Comma"; break;
-    case AsmToken::Dollar:         OS << "Dollar"; break;
-    case AsmToken::Dot:            OS << "Dot"; break;
-    case AsmToken::EndOfStatement: OS << "EndOfStatement"; break;
-    case AsmToken::Eof:            OS << "Eof"; break;
-    case AsmToken::Equal:          OS << "Equal"; break;
-    case AsmToken::EqualEqual:     OS << "EqualEqual"; break;
-    case AsmToken::Exclaim:        OS << "Exclaim"; break;
-    case AsmToken::ExclaimEqual:   OS << "ExclaimEqual"; break;
-    case AsmToken::Greater:        OS << "Greater"; break;
-    case AsmToken::GreaterEqual:   OS << "GreaterEqual"; break;
-    case AsmToken::GreaterGreater: OS << "GreaterGreater"; break;
-    case AsmToken::Hash:           OS << "Hash"; break;
-    case AsmToken::LBrac:          OS << "LBrac"; break;
-    case AsmToken::LCurly:         OS << "LCurly"; break;
-    case AsmToken::LParen:         OS << "LParen"; break;
-    case AsmToken::Less:           OS << "Less"; break;
-    case AsmToken::LessEqual:      OS << "LessEqual"; break;
-    case AsmToken::LessGreater:    OS << "LessGreater"; break;
-    case AsmToken::LessLess:       OS << "LessLess"; break;
-    case AsmToken::Minus:          OS << "Minus"; break;
-    case AsmToken::Percent:        OS << "Percent"; break;
-    case AsmToken::Pipe:           OS << "Pipe"; break;
-    case AsmToken::PipePipe:       OS << "PipePipe"; break;
-    case AsmToken::Plus:           OS << "Plus"; break;
-    case AsmToken::RBrac:          OS << "RBrac"; break;
-    case AsmToken::RCurly:         OS << "RCurly"; break;
-    case AsmToken::RParen:         OS << "RParen"; break;
-    case AsmToken::Slash:          OS << "Slash"; break;
-    case AsmToken::Star:           OS << "Star"; break;
-    case AsmToken::Tilde:          OS << "Tilde"; break;
-    case AsmToken::PercentCall16:
-      OS << "PercentCall16";
-      break;
-    case AsmToken::PercentCall_Hi:
-      OS << "PercentCall_Hi";
-      break;
-    case AsmToken::PercentCall_Lo:
-      OS << "PercentCall_Lo";
-      break;
-    case AsmToken::PercentDtprel_Hi:
-      OS << "PercentDtprel_Hi";
-      break;
-    case AsmToken::PercentDtprel_Lo:
-      OS << "PercentDtprel_Lo";
-      break;
-    case AsmToken::PercentGot:
-      OS << "PercentGot";
-      break;
-    case AsmToken::PercentGot_Disp:
-      OS << "PercentGot_Disp";
-      break;
-    case AsmToken::PercentGot_Hi:
-      OS << "PercentGot_Hi";
-      break;
-    case AsmToken::PercentGot_Lo:
-      OS << "PercentGot_Lo";
-      break;
-    case AsmToken::PercentGot_Ofst:
-      OS << "PercentGot_Ofst";
-      break;
-    case AsmToken::PercentGot_Page:
-      OS << "PercentGot_Page";
-      break;
-    case AsmToken::PercentGottprel:
-      OS << "PercentGottprel";
-      break;
-    case AsmToken::PercentGp_Rel:
-      OS << "PercentGp_Rel";
-      break;
-    case AsmToken::PercentHi:
-      OS << "PercentHi";
-      break;
-    case AsmToken::PercentHigher:
-      OS << "PercentHigher";
-      break;
-    case AsmToken::PercentHighest:
-      OS << "PercentHighest";
-      break;
-    case AsmToken::PercentLo:
-      OS << "PercentLo";
-      break;
-    case AsmToken::PercentNeg:
-      OS << "PercentNeg";
-      break;
-    case AsmToken::PercentPcrel_Hi:
-      OS << "PercentPcrel_Hi";
-      break;
-    case AsmToken::PercentPcrel_Lo:
-      OS << "PercentPcrel_Lo";
-      break;
-    case AsmToken::PercentTlsgd:
-      OS << "PercentTlsgd";
-      break;
-    case AsmToken::PercentTlsldm:
-      OS << "PercentTlsldm";
-      break;
-    case AsmToken::PercentTprel_Hi:
-      OS << "PercentTprel_Hi";
-      break;
-    case AsmToken::PercentTprel_Lo:
-      OS << "PercentTprel_Lo";
-      break;
-    }
-
-    // Print the token string.
-    OS << " (\"";
-    OS.write_escaped(Tok.getString());
-    OS << "\")\n";
   }
 
   return Error;
 }
 
-static int fillCommandLineSymbols(MCAsmParser &Parser){
-  for(auto &I: DefineSymbol){
+static int fillCommandLineSymbols(MCAsmParser &Parser) {
+  for (auto &I: DefineSymbol) {
     auto Pair = StringRef(I).split('=');
-    if(Pair.second.empty()){
-      errs() << "error: defsym must be of the form: sym=value: " << I;
+    auto Sym = Pair.first;
+    auto Val = Pair.second;
+
+    if (Sym.empty() || Val.empty()) {
+      errs() << "error: defsym must be of the form: sym=value: " << I << "\n";
       return 1;
     }
     int64_t Value;
-    if(Pair.second.getAsInteger(0, Value)){
-      errs() << "error: Value is not an integer: " << Pair.second;
+    if (Val.getAsInteger(0, Value)) {
+      errs() << "error: Value is not an integer: " << Val << "\n";
       return 1;
     }
-    auto &Context = Parser.getContext();
-    auto Symbol = Context.getOrCreateSymbol(Pair.first);
-    Parser.getStreamer().EmitAssignment(Symbol,
-                                        MCConstantExpr::create(Value, Context));
+    Parser.getContext().setSymbolValue(Parser.getStreamer(), Sym, Value);
   }
   return 0;
 }
@@ -494,7 +348,7 @@ int main(int argc, char **argv) {
 
   MAI->setRelaxELFRelocations(RelaxELFRel);
 
-  if (CompressDebugSections != DebugCompressionType::DCT_None) {
+  if (CompressDebugSections != DebugCompressionType::None) {
     if (!zlib::isAvailable()) {
       errs() << ProgName
              << ": build tools with zlib to enable -compress-debug-sections";
@@ -508,7 +362,7 @@ int main(int argc, char **argv) {
   // MCObjectFileInfo needs a MCContext reference in order to initialize itself.
   MCObjectFileInfo MOFI;
   MCContext Ctx(MAI.get(), MRI.get(), &MOFI, &SrcMgr);
-  MOFI.InitMCObjectFileInfo(TheTriple, PIC, CMModel, Ctx);
+  MOFI.InitMCObjectFileInfo(TheTriple, PIC, Ctx, LargeCodeModel);
 
   if (SaveTempLabels)
     Ctx.setAllowTemporaryLabels(false);
@@ -516,7 +370,7 @@ int main(int argc, char **argv) {
   Ctx.setGenDwarfForAssembly(GenDwarfForAssembly);
   // Default to 4 for dwarf version.
   unsigned DwarfVersion = MCOptions.DwarfVersion ? MCOptions.DwarfVersion : 4;
-  if (DwarfVersion < 2 || DwarfVersion > 4) {
+  if (DwarfVersion < 2 || DwarfVersion > 5) {
     errs() << ProgName << ": Dwarf version " << DwarfVersion
            << " is not supported." << '\n';
     return 1;
@@ -536,6 +390,18 @@ int main(int argc, char **argv) {
   }
   if (!MainFileName.empty())
     Ctx.setMainFileName(MainFileName);
+  if (DwarfVersion >= 5) {
+    // DWARF v5 needs the root file as well as the compilation directory.
+    // If we find a '.file 0' directive that will supersede these values.
+    MD5 Hash;
+    MD5::MD5Result *Cksum =
+        (MD5::MD5Result *)Ctx.allocate(sizeof(MD5::MD5Result), 1);
+    Hash.update(Buffer->getBuffer());
+    Hash.final(*Cksum);
+    Ctx.setMCLineTableRootFile(
+        /*CUID=*/0, Ctx.getCompilationDir(),
+        !MainFileName.empty() ? MainFileName : InputFilename, Cksum, None);
+  }
 
   // Package up features to be passed to target/subtarget
   std::string FeaturesStr;
@@ -546,7 +412,7 @@ int main(int argc, char **argv) {
     FeaturesStr = Features.getString();
   }
 
-  std::unique_ptr<tool_output_file> Out = GetOutputStream();
+  std::unique_ptr<ToolOutputFile> Out = GetOutputStream();
   if (!Out)
     return 1;
 
@@ -563,6 +429,14 @@ int main(int argc, char **argv) {
     IP = TheTarget->createMCInstPrinter(Triple(TripleName), OutputAsmVariant,
                                         *MAI, *MCII, *MRI);
 
+    if (!IP) {
+      errs()
+          << "error: unable to create instruction printer for target triple '"
+          << TheTriple.normalize() << "' with assembly variant "
+          << OutputAsmVariant << ".\n";
+      return 1;
+    }
+
     // Set the display preference for hex vs. decimal immediates.
     IP->setPrintImmHex(PrintImmHex);
 
@@ -571,7 +445,7 @@ int main(int argc, char **argv) {
     MCAsmBackend *MAB = nullptr;
     if (ShowEncoding) {
       CE = TheTarget->createMCCodeEmitter(*MCII, *MRI, Ctx);
-      MAB = TheTarget->createMCAsmBackend(*MRI, TripleName, MCPU, MCOptions);
+      MAB = TheTarget->createMCAsmBackend(*STI, *MRI, MCOptions);
     }
     auto FOut = llvm::make_unique<formatted_raw_ostream>(*OS);
     Str.reset(TheTarget->createAsmStreamer(
@@ -592,10 +466,10 @@ int main(int argc, char **argv) {
     }
 
     MCCodeEmitter *CE = TheTarget->createMCCodeEmitter(*MCII, *MRI, Ctx);
-    MCAsmBackend *MAB = TheTarget->createMCAsmBackend(*MRI, TripleName, MCPU,
-                                                      MCOptions);
+    MCAsmBackend *MAB = TheTarget->createMCAsmBackend(*STI, *MRI, MCOptions);
     Str.reset(TheTarget->createMCObjectStreamer(
-        TheTriple, Ctx, *MAB, *OS, CE, *STI, MCOptions.MCRelaxAll,
+        TheTriple, Ctx, std::unique_ptr<MCAsmBackend>(MAB), *OS,
+        std::unique_ptr<MCCodeEmitter>(CE), *STI, MCOptions.MCRelaxAll,
         MCOptions.MCIncrementalLinkerCompatible,
         /*DWARFMustBeAtTheEnd*/ false));
     if (NoExecStack)

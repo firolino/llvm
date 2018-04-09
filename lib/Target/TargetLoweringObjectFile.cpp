@@ -13,24 +13,21 @@
 //===----------------------------------------------------------------------===//
 
 #include "llvm/Target/TargetLoweringObjectFile.h"
+#include "llvm/BinaryFormat/Dwarf.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/DataLayout.h"
 #include "llvm/IR/DerivedTypes.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/GlobalVariable.h"
 #include "llvm/IR/Mangler.h"
-#include "llvm/MC/MCAsmInfo.h"
 #include "llvm/MC/MCContext.h"
 #include "llvm/MC/MCExpr.h"
 #include "llvm/MC/MCStreamer.h"
 #include "llvm/MC/MCSymbol.h"
-#include "llvm/Support/Dwarf.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/raw_ostream.h"
-#include "llvm/Target/TargetLowering.h"
 #include "llvm/Target/TargetMachine.h"
 #include "llvm/Target/TargetOptions.h"
-#include "llvm/Target/TargetSubtargetInfo.h"
 using namespace llvm;
 
 //===----------------------------------------------------------------------===//
@@ -44,21 +41,34 @@ void TargetLoweringObjectFile::Initialize(MCContext &ctx,
                                           const TargetMachine &TM) {
   Ctx = &ctx;
   // `Initialize` can be called more than once.
-  if (Mang != nullptr) delete Mang;
+  delete Mang;
   Mang = new Mangler();
-  InitMCObjectFileInfo(TM.getTargetTriple(), TM.isPositionIndependent(),
-                       TM.getCodeModel(), *Ctx);
+  InitMCObjectFileInfo(TM.getTargetTriple(), TM.isPositionIndependent(), *Ctx,
+                       TM.getCodeModel() == CodeModel::Large);
 }
 
 TargetLoweringObjectFile::~TargetLoweringObjectFile() {
   delete Mang;
 }
 
+static bool isNullOrUndef(const Constant *C) {
+  // Check that the constant isn't all zeros or undefs.
+  if (C->isNullValue() || isa<UndefValue>(C))
+    return true;
+  if (!isa<ConstantAggregate>(C))
+    return false;
+  for (auto Operand : C->operand_values()) {
+    if (!isNullOrUndef(cast<Constant>(Operand)))
+      return false;
+  }
+  return true;
+}
+
 static bool isSuitableForBSS(const GlobalVariable *GV, bool NoZerosInBSS) {
   const Constant *C = GV->getInitializer();
 
   // Must have zero initializer.
-  if (!C->isNullValue())
+  if (!isNullOrUndef(C))
     return false;
 
   // Leave constant zeros in readonly constant sections, so they can be shared.
@@ -118,7 +128,7 @@ MCSymbol *TargetLoweringObjectFile::getSymbolWithGlobalValueBase(
 MCSymbol *TargetLoweringObjectFile::getCFIPersonalitySymbol(
     const GlobalValue *GV, const TargetMachine &TM,
     MachineModuleInfo *MMI) const {
-  return TM.getSymbol(GV, *Mang);
+  return TM.getSymbol(GV);
 }
 
 void TargetLoweringObjectFile::emitPersonalityValue(MCStreamer &Streamer,
@@ -132,15 +142,15 @@ void TargetLoweringObjectFile::emitPersonalityValue(MCStreamer &Streamer,
 /// classifies the global in a variety of ways that make various target
 /// implementations simpler.  The target implementation is free to ignore this
 /// extra info of course.
-SectionKind TargetLoweringObjectFile::getKindForGlobal(const GlobalValue *GV,
+SectionKind TargetLoweringObjectFile::getKindForGlobal(const GlobalObject *GO,
                                                        const TargetMachine &TM){
-  assert(!GV->isDeclaration() && !GV->hasAvailableExternallyLinkage() &&
+  assert(!GO->isDeclaration() && !GO->hasAvailableExternallyLinkage() &&
          "Can only be used for global definitions");
 
   Reloc::Model ReloModel = TM.getRelocationModel();
 
   // Early exit - functions should be always in text sections.
-  const GlobalVariable *GVar = dyn_cast<GlobalVariable>(GV);
+  const auto *GVar = dyn_cast<GlobalVariable>(GO);
   if (!GVar)
     return SectionKind::getText();
 
@@ -201,7 +211,8 @@ SectionKind TargetLoweringObjectFile::getKindForGlobal(const GlobalValue *GV,
       // Otherwise, just drop it into a mergable constant section.  If we have
       // a section for this size, use it, otherwise use the arbitrary sized
       // mergable section.
-      switch (GV->getParent()->getDataLayout().getTypeAllocSize(C->getType())) {
+      switch (
+          GVar->getParent()->getDataLayout().getTypeAllocSize(C->getType())) {
       case 4:  return SectionKind::getMergeableConst4();
       case 8:  return SectionKind::getMergeableConst8();
       case 16: return SectionKind::getMergeableConst16();
@@ -234,13 +245,27 @@ SectionKind TargetLoweringObjectFile::getKindForGlobal(const GlobalValue *GV,
 /// variable or function definition.  This should not be passed external (or
 /// available externally) globals.
 MCSection *TargetLoweringObjectFile::SectionForGlobal(
-    const GlobalValue *GV, SectionKind Kind, const TargetMachine &TM) const {
+    const GlobalObject *GO, SectionKind Kind, const TargetMachine &TM) const {
   // Select section name.
-  if (GV->hasSection())
-    return getExplicitSectionGlobal(GV, Kind, TM);
+  if (GO->hasSection())
+    return getExplicitSectionGlobal(GO, Kind, TM);
+
+  if (auto *GVar = dyn_cast<GlobalVariable>(GO)) {
+    auto Attrs = GVar->getAttributes();
+    if ((Attrs.hasAttribute("bss-section") && Kind.isBSS()) ||
+        (Attrs.hasAttribute("data-section") && Kind.isData()) ||
+        (Attrs.hasAttribute("rodata-section") && Kind.isReadOnly()))  {
+       return getExplicitSectionGlobal(GO, Kind, TM);
+    }
+  }
+
+  if (auto *F = dyn_cast<Function>(GO)) {
+    if (F->hasFnAttribute("implicit-section-name"))
+      return getExplicitSectionGlobal(GO, Kind, TM);
+  }
 
   // Use default section depending on the 'type' of global
-  return SelectSectionForGlobal(GV, Kind, TM);
+  return SelectSectionForGlobal(GO, Kind, TM);
 }
 
 MCSection *TargetLoweringObjectFile::getSectionForJumpTable(
@@ -263,10 +288,7 @@ bool TargetLoweringObjectFile::shouldPutJumpTableInFunctionSection(
   // in discardable section
   // FIXME: this isn't the right predicate, should be based on the MCSection
   // for the function.
-  if (F.isWeakForLinker())
-    return true;
-
-  return false;
+  return F.isWeakForLinker();
 }
 
 /// Given a mergable constant with the specified size and relocation
@@ -287,7 +309,7 @@ const MCExpr *TargetLoweringObjectFile::getTTypeGlobalReference(
     const GlobalValue *GV, unsigned Encoding, const TargetMachine &TM,
     MachineModuleInfo *MMI, MCStreamer &Streamer) const {
   const MCSymbolRefExpr *Ref =
-      MCSymbolRefExpr::create(TM.getSymbol(GV, *Mang), getContext());
+      MCSymbolRefExpr::create(TM.getSymbol(GV), getContext());
 
   return getTTypeReference(Ref, Encoding, Streamer);
 }

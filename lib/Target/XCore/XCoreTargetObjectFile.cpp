@@ -9,10 +9,10 @@
 
 #include "XCoreTargetObjectFile.h"
 #include "XCoreSubtarget.h"
+#include "llvm/BinaryFormat/ELF.h"
 #include "llvm/IR/DataLayout.h"
 #include "llvm/MC/MCContext.h"
 #include "llvm/MC/MCSectionELF.h"
-#include "llvm/Support/ELF.h"
 #include "llvm/Target/TargetMachine.h"
 
 using namespace llvm;
@@ -96,8 +96,8 @@ static unsigned getXCoreSectionFlags(SectionKind K, bool IsCPRel) {
 }
 
 MCSection *XCoreTargetObjectFile::getExplicitSectionGlobal(
-    const GlobalValue *GV, SectionKind Kind, const TargetMachine &TM) const {
-  StringRef SectionName = GV->getSection();
+    const GlobalObject *GO, SectionKind Kind, const TargetMachine &TM) const {
+  StringRef SectionName = GO->getSection();
   // Infer section flags from the section name if we can.
   bool IsCPRel = SectionName.startswith(".cp.");
   if (IsCPRel && !Kind.isReadOnly())
@@ -107,9 +107,9 @@ MCSection *XCoreTargetObjectFile::getExplicitSectionGlobal(
 }
 
 MCSection *XCoreTargetObjectFile::SelectSectionForGlobal(
-    const GlobalValue *GV, SectionKind Kind, const TargetMachine &TM) const {
+    const GlobalObject *GO, SectionKind Kind, const TargetMachine &TM) const {
 
-  bool UseCPRel = GV->isLocalLinkage(GV->getLinkage());
+  bool UseCPRel = GO->hasLocalLinkage();
 
   if (Kind.isText())                    return TextSection;
   if (UseCPRel) {
@@ -118,8 +118,8 @@ MCSection *XCoreTargetObjectFile::SelectSectionForGlobal(
     if (Kind.isMergeableConst8())       return MergeableConst8Section;
     if (Kind.isMergeableConst16())      return MergeableConst16Section;
   }
-  Type *ObjType = GV->getValueType();
-  auto &DL = GV->getParent()->getDataLayout();
+  Type *ObjType = GO->getValueType();
+  auto &DL = GO->getParent()->getDataLayout();
   if (TM.getCodeModel() == CodeModel::Small || !ObjType->isSized() ||
       DL.getTypeAllocSize(ObjType) < CodeModelLargeSize) {
     if (Kind.isReadOnly())              return UseCPRel? ReadOnlySection

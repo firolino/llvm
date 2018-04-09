@@ -177,12 +177,12 @@ public:
 
   bool isPredicated(const MachineInstr &MI) const override;
 
-  bool isPredicable(MachineInstr &MI) const override;
+  bool isPredicable(const MachineInstr &MI) const override;
 
-  bool isProfitableToDupForIfCvt(MachineBasicBlock &MBB, unsigned NumCyles,
+  bool isProfitableToDupForIfCvt(MachineBasicBlock &MBB, unsigned NumCycles,
                                  BranchProbability Probability) const override;
 
-  bool isProfitableToIfCvt(MachineBasicBlock &MBB, unsigned NumCyles,
+  bool isProfitableToIfCvt(MachineBasicBlock &MBB, unsigned NumCycles,
                            unsigned ExtraPredCycles,
                            BranchProbability Probability) const override ;
 
@@ -211,7 +211,8 @@ public:
 
   /// \brief Reserve the registers that may be accesed using indirect addressing.
   void reserveIndirectRegisters(BitVector &Reserved,
-                                const MachineFunction &MF) const;
+                                const MachineFunction &MF,
+                                const R600RegisterInfo &TRI) const;
 
   /// Calculate the "Indirect Address" for the given \p RegIndex and
   /// \p Channel
@@ -318,6 +319,9 @@ public:
   bool isRegisterLoad(const MachineInstr &MI) const {
     return get(MI.getOpcode()).TSFlags & R600InstrFlags::REGISTER_LOAD;
   }
+
+  unsigned getAddressSpaceForPseudoSourceKind(
+      PseudoSourceValue::PSVKind Kind) const override;
 };
 
 namespace AMDGPU {

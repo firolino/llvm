@@ -51,6 +51,12 @@ namespace llvm {
   /// module is modified.
   bool UpgradeModuleFlags(Module &M);
 
+  /// This checks for objc retain release marker which should be upgraded. It
+  /// returns true if module is modified.
+  bool UpgradeRetainReleaseMarker(Module &M);
+
+  void UpgradeSectionAttributes(Module &M);
+
   /// If the given TBAA tag uses the scalar TBAA format, create a new node
   /// corresponding to the upgrade to the struct-path aware TBAA format.
   /// Otherwise return the \p TBAANode itself.

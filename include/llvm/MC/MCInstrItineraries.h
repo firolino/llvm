@@ -1,4 +1,4 @@
-//===-- llvm/MC/MCInstrItineraries.h - Scheduling ---------------*- C++ -*-===//
+//===- llvm/MC/MCInstrItineraries.h - Scheduling ----------------*- C++ -*-===//
 //
 //                     The LLVM Compiler Infrastructure
 //
@@ -88,37 +88,33 @@ struct InstrStage {
   }
 };
 
-
 //===----------------------------------------------------------------------===//
 /// An itinerary represents the scheduling information for an instruction.
 /// This includes a set of stages occupied by the instruction and the pipeline
 /// cycle in which operands are read and written.
 ///
 struct InstrItinerary {
-  int      NumMicroOps;        ///< # of micro-ops, -1 means it's variable
-  unsigned FirstStage;         ///< Index of first stage in itinerary
-  unsigned LastStage;          ///< Index of last + 1 stage in itinerary
-  unsigned FirstOperandCycle;  ///< Index of first operand rd/wr
-  unsigned LastOperandCycle;   ///< Index of last + 1 operand rd/wr
+  int16_t  NumMicroOps;        ///< # of micro-ops, -1 means it's variable
+  uint16_t FirstStage;         ///< Index of first stage in itinerary
+  uint16_t LastStage;          ///< Index of last + 1 stage in itinerary
+  uint16_t FirstOperandCycle;  ///< Index of first operand rd/wr
+  uint16_t LastOperandCycle;   ///< Index of last + 1 operand rd/wr
 };
-
 
 //===----------------------------------------------------------------------===//
 /// Itinerary data supplied by a subtarget to be used by a target.
 ///
 class InstrItineraryData {
 public:
-  MCSchedModel          SchedModel;     ///< Basic machine properties.
-  const InstrStage     *Stages;         ///< Array of stages selected
-  const unsigned       *OperandCycles;  ///< Array of operand cycles selected
-  const unsigned       *Forwardings;    ///< Array of pipeline forwarding pathes
-  const InstrItinerary *Itineraries;    ///< Array of itineraries selected
+  MCSchedModel SchedModel =
+      MCSchedModel::GetDefaultSchedModel(); ///< Basic machine properties.
+  const InstrStage *Stages = nullptr;       ///< Array of stages selected
+  const unsigned *OperandCycles = nullptr; ///< Array of operand cycles selected
+  const unsigned *Forwardings = nullptr; ///< Array of pipeline forwarding paths
+  const InstrItinerary *Itineraries =
+      nullptr; ///< Array of itineraries selected
 
-  /// Ctors.
-  InstrItineraryData() : SchedModel(MCSchedModel::GetDefaultSchedModel()),
-                         Stages(nullptr), OperandCycles(nullptr),
-                         Forwardings(nullptr), Itineraries(nullptr) {}
-
+  InstrItineraryData() = default;
   InstrItineraryData(const MCSchedModel &SM, const InstrStage *S,
                      const unsigned *OS, const unsigned *F)
     : SchedModel(SM), Stages(S), OperandCycles(OS), Forwardings(F),
@@ -129,8 +125,8 @@ public:
 
   /// \brief Returns true if the index is for the end marker itinerary.
   bool isEndMarker(unsigned ItinClassIndx) const {
-    return ((Itineraries[ItinClassIndx].FirstStage == ~0U) &&
-            (Itineraries[ItinClassIndx].LastStage == ~0U));
+    return ((Itineraries[ItinClassIndx].FirstStage == UINT16_MAX) &&
+            (Itineraries[ItinClassIndx].LastStage == UINT16_MAX));
   }
 
   /// \brief Return the first stage of the itinerary.
@@ -234,6 +230,6 @@ public:
   }
 };
 
-} // End llvm namespace
+} // end namespace llvm
 
-#endif
+#endif // LLVM_MC_MCINSTRITINERARIES_H

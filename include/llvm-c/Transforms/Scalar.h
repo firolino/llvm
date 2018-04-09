@@ -56,6 +56,9 @@ void LLVMAddMergedLoadStoreMotionPass(LLVMPassManagerRef PM);
 /** See llvm::createGVNPass function. */
 void LLVMAddGVNPass(LLVMPassManagerRef PM);
 
+/** See llvm::createGVNPass function. */
+void LLVMAddNewGVNPass(LLVMPassManagerRef PM);
+
 /** See llvm::createIndVarSimplifyPass function. */
 void LLVMAddIndVarSimplifyPass(LLVMPassManagerRef PM);
 
@@ -91,12 +94,6 @@ void LLVMAddMemCpyOptPass(LLVMPassManagerRef PM);
 
 /** See llvm::createPartiallyInlineLibCallsPass function. */
 void LLVMAddPartiallyInlineLibCallsPass(LLVMPassManagerRef PM);
-
-/** See llvm::createLowerSwitchPass function. */
-void LLVMAddLowerSwitchPass(LLVMPassManagerRef PM);
-
-/** See llvm::createPromoteMemoryToRegisterPass function. */
-void LLVMAddPromoteMemoryToRegisterPass(LLVMPassManagerRef PM);
 
 /** See llvm::createReassociatePass function. */
 void LLVMAddReassociatePass(LLVMPassManagerRef PM);

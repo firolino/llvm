@@ -17,8 +17,11 @@
 #ifndef LLVM_UTILS_TABLEGEN_CODEGENTARGET_H
 #define LLVM_UTILS_TABLEGEN_CODEGENTARGET_H
 
+#include "CodeGenHwModes.h"
 #include "CodeGenInstruction.h"
 #include "CodeGenRegisters.h"
+#include "InfoByHwMode.h"
+#include "SDNodeProperties.h"
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/TableGen/Record.h"
 #include <algorithm>
@@ -28,25 +31,6 @@ namespace llvm {
 struct CodeGenRegister;
 class CodeGenSchedModels;
 class CodeGenTarget;
-
-// SelectionDAG node properties.
-//  SDNPMemOperand: indicates that a node touches memory and therefore must
-//                  have an associated memory operand that describes the access.
-enum SDNP {
-  SDNPCommutative,
-  SDNPAssociative,
-  SDNPHasChain,
-  SDNPOutGlue,
-  SDNPInGlue,
-  SDNPOptInGlue,
-  SDNPMayLoad,
-  SDNPMayStore,
-  SDNPSideEffect,
-  SDNPMemOperand,
-  SDNPVariadic,
-  SDNPWantRoot,
-  SDNPWantParent
-};
 
 /// getValueType - Return the MVT::SimpleValueType that the specified TableGen
 /// record corresponds to.
@@ -69,7 +53,8 @@ class CodeGenTarget {
                    std::unique_ptr<CodeGenInstruction>> Instructions;
   mutable std::unique_ptr<CodeGenRegBank> RegBank;
   mutable std::vector<Record*> RegAltNameIndices;
-  mutable SmallVector<MVT::SimpleValueType, 8> LegalValueTypes;
+  mutable SmallVector<ValueTypeByHwMode, 8> LegalValueTypes;
+  CodeGenHwModes CGH;
   void ReadRegAltNameIndices() const;
   void ReadInstructions() const;
   void ReadLegalValueTypes() const;
@@ -82,15 +67,20 @@ public:
   ~CodeGenTarget();
 
   Record *getTargetRecord() const { return TargetRec; }
-  const std::string &getName() const;
+  const StringRef getName() const;
 
   /// getInstNamespace - Return the target-specific instruction namespace.
   ///
-  std::string getInstNamespace() const;
+  StringRef getInstNamespace() const;
 
   /// getInstructionSet - Return the InstructionSet object.
   ///
   Record *getInstructionSet() const;
+
+  /// getAllowRegisterRenaming - Return the AllowRegisterRenaming flag value for
+  /// this target.
+  ///
+  bool getAllowRegisterRenaming() const;
 
   /// getAsmParser - Return the AssemblyParser definition for this target.
   ///
@@ -128,21 +118,17 @@ public:
 
   /// getRegisterVTs - Find the union of all possible SimpleValueTypes for the
   /// specified physical register.
-  std::vector<MVT::SimpleValueType> getRegisterVTs(Record *R) const;
+  std::vector<ValueTypeByHwMode> getRegisterVTs(Record *R) const;
 
-  ArrayRef<MVT::SimpleValueType> getLegalValueTypes() const {
-    if (LegalValueTypes.empty()) ReadLegalValueTypes();
+  ArrayRef<ValueTypeByHwMode> getLegalValueTypes() const {
+    if (LegalValueTypes.empty())
+      ReadLegalValueTypes();
     return LegalValueTypes;
   }
 
-  /// isLegalValueType - Return true if the specified value type is natively
-  /// supported by the target (i.e. there are registers that directly hold it).
-  bool isLegalValueType(MVT::SimpleValueType VT) const {
-    ArrayRef<MVT::SimpleValueType> LegalVTs = getLegalValueTypes();
-    return is_contained(LegalVTs, VT);
-  }
-
   CodeGenSchedModels &getSchedModels() const;
+
+  const CodeGenHwModes &getHwModes() const { return CGH; }
 
 private:
   DenseMap<const Record*, std::unique_ptr<CodeGenInstruction>> &
@@ -158,6 +144,9 @@ public:
     assert(I != Instructions.end() && "Not an instruction");
     return *I->second;
   }
+
+  /// Returns the number of predefined instructions.
+  static unsigned getNumFixedInstructions();
 
   /// getInstructionsByEnumValue - Return all of the instructions defined by the
   /// target, ordered by their enum value.
@@ -196,8 +185,8 @@ class ComplexPattern {
   std::string SelectFunc;
   std::vector<Record*> RootNodes;
   unsigned Properties; // Node properties
+  unsigned Complexity;
 public:
-  ComplexPattern() : NumOperands(0) {}
   ComplexPattern(Record *R);
 
   MVT::SimpleValueType getValueType() const { return Ty; }
@@ -207,6 +196,7 @@ public:
     return RootNodes;
   }
   bool hasProperty(enum SDNP Prop) const { return Properties & (1 << Prop); }
+  unsigned getComplexity() const { return Complexity; }
 };
 
 } // End llvm namespace

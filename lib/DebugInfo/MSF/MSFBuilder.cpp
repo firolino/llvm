@@ -1,3 +1,4 @@
+//===- MSFBuilder.cpp -----------------------------------------------------===//
 //
 //                     The LLVM Compiler Infrastructure
 //
@@ -6,29 +7,36 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "llvm/ADT/ArrayRef.h"
 #include "llvm/DebugInfo/MSF/MSFBuilder.h"
 #include "llvm/DebugInfo/MSF/MSFError.h"
+#include "llvm/Support/Endian.h"
+#include "llvm/Support/Error.h"
+#include <algorithm>
+#include <cassert>
+#include <cstdint>
+#include <cstring>
+#include <memory>
+#include <utility>
+#include <vector>
 
 using namespace llvm;
 using namespace llvm::msf;
 using namespace llvm::support;
 
-namespace {
-const uint32_t kSuperBlockBlock = 0;
-const uint32_t kFreePageMap0Block = 1;
-const uint32_t kFreePageMap1Block = 2;
-const uint32_t kNumReservedPages = 3;
+static const uint32_t kSuperBlockBlock = 0;
+static const uint32_t kFreePageMap0Block = 1;
+static const uint32_t kFreePageMap1Block = 2;
+static const uint32_t kNumReservedPages = 3;
 
-const uint32_t kDefaultFreePageMap = kFreePageMap0Block;
-const uint32_t kDefaultBlockMapAddr = kNumReservedPages;
-}
+static const uint32_t kDefaultFreePageMap = kFreePageMap1Block;
+static const uint32_t kDefaultBlockMapAddr = kNumReservedPages;
 
 MSFBuilder::MSFBuilder(uint32_t BlockSize, uint32_t MinBlockCount, bool CanGrow,
                        BumpPtrAllocator &Allocator)
     : Allocator(Allocator), IsGrowable(CanGrow),
       FreePageMap(kDefaultFreePageMap), BlockSize(BlockSize),
-      MininumBlocks(MinBlockCount), BlockMapAddr(kDefaultBlockMapAddr),
-      FreeBlocks(MinBlockCount, true) {
+      BlockMapAddr(kDefaultBlockMapAddr), FreeBlocks(MinBlockCount, true) {
   FreeBlocks[kSuperBlockBlock] = false;
   FreeBlocks[kFreePageMap0Block] = false;
   FreeBlocks[kFreePageMap1Block] = false;
@@ -98,7 +106,23 @@ Error MSFBuilder::allocateBlocks(uint32_t NumBlocks,
       return make_error<MSFError>(msf_error_code::insufficient_buffer,
                                   "There are no free Blocks in the file");
     uint32_t AllocBlocks = NumBlocks - NumFreeBlocks;
-    FreeBlocks.resize(AllocBlocks + FreeBlocks.size(), true);
+    uint32_t OldBlockCount = FreeBlocks.size();
+    uint32_t NewBlockCount = AllocBlocks + OldBlockCount;
+    uint32_t NextFpmBlock = alignTo(OldBlockCount, BlockSize) + 1;
+    FreeBlocks.resize(NewBlockCount, true);
+    // If we crossed over an fpm page, we actually need to allocate 2 extra
+    // blocks for each FPM group crossed and mark both blocks from the group as
+    // used.  FPM blocks are marked as allocated regardless of whether or not
+    // they ultimately describe the status of blocks in the file.  This means
+    // that not only are extraneous blocks at the end of the main FPM marked as
+    // allocated, but also blocks from the alternate FPM are always marked as
+    // allocated.
+    while (NextFpmBlock < NewBlockCount) {
+      NewBlockCount += 2;
+      FreeBlocks.resize(NewBlockCount, true);
+      FreeBlocks.reset(NextFpmBlock, NextFpmBlock + 2);
+      NextFpmBlock += BlockSize;
+    }
   }
 
   int I = 0;
@@ -263,7 +287,7 @@ Expected<MSFLayout> MSFBuilder::build() {
 
   // The stream sizes should be re-allocated as a stable pointer and the stream
   // map should have each of its entries allocated as a separate stable pointer.
-  if (StreamData.size() > 0) {
+  if (!StreamData.empty()) {
     ulittle32_t *Sizes = Allocator.Allocate<ulittle32_t>(StreamData.size());
     L.StreamSizes = ArrayRef<ulittle32_t>(Sizes, StreamData.size());
     L.StreamMap.resize(StreamData.size());
@@ -277,6 +301,8 @@ Expected<MSFLayout> MSFBuilder::build() {
           ArrayRef<ulittle32_t>(BlockList, StreamData[I].second.size());
     }
   }
+
+  L.FreePageMap = FreeBlocks;
 
   return L;
 }

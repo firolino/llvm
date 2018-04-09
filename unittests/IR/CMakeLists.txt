@@ -3,22 +3,29 @@ set(LLVM_LINK_COMPONENTS
   AsmParser
   Core
   Support
+  Passes
   )
 
 set(IRSources
   AsmWriterTest.cpp
   AttributesTest.cpp
+  BasicBlockTest.cpp
+  CFGBuilder.cpp
   ConstantRangeTest.cpp
   ConstantsTest.cpp
   DebugInfoTest.cpp
   DebugTypeODRUniquingTest.cpp
+  DeferredDominanceTest.cpp
   DominatorTreeTest.cpp
+  DominatorTreeBatchUpdatesTest.cpp
   FunctionTest.cpp
+  PassBuilderCallbacksTest.cpp
   IRBuilderTest.cpp
   InstructionsTest.cpp
   IntrinsicsTest.cpp
   LegacyPassManagerTest.cpp
   MDBuilderTest.cpp
+  ManglerTest.cpp
   MetadataTest.cpp
   ModuleTest.cpp
   PassManagerTest.cpp

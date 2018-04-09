@@ -13,8 +13,10 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "CoverageExporterJson.h"
 #include "CoverageFilters.h"
 #include "CoverageReport.h"
+#include "CoverageSummaryInfo.h"
 #include "CoverageViewOptions.h"
 #include "RenderingSupport.h"
 #include "SourceCoverageView.h"
@@ -30,16 +32,20 @@
 #include "llvm/Support/Path.h"
 #include "llvm/Support/Process.h"
 #include "llvm/Support/Program.h"
+#include "llvm/Support/ScopedPrinter.h"
 #include "llvm/Support/ThreadPool.h"
+#include "llvm/Support/Threading.h"
 #include "llvm/Support/ToolOutputFile.h"
+
 #include <functional>
+#include <map>
 #include <system_error>
 
 using namespace llvm;
 using namespace coverage;
 
-void exportCoverageDataToJson(StringRef ObjectFilename,
-                              const coverage::CoverageMapping &CoverageMapping,
+void exportCoverageDataToJson(const coverage::CoverageMapping &CoverageMapping,
+                              const CoverageViewOptions &Options,
                               raw_ostream &OS);
 
 namespace {
@@ -89,8 +95,12 @@ private:
   std::unique_ptr<SourceCoverageView>
   createSourceFileView(StringRef SourceFile, const CoverageMapping &Coverage);
 
-  /// \brief Load the coverage mapping data. Return nullptr if an error occured.
+  /// \brief Load the coverage mapping data. Return nullptr if an error occurred.
   std::unique_ptr<CoverageMapping> load();
+
+  /// \brief Create a mapping from files in the Coverage data to local copies
+  /// (path-equivalence).
+  void remapPathNames(const CoverageMapping &Coverage);
 
   /// \brief Remove input source files which aren't mapped by \p Coverage.
   void removeUnmappedInputs(const CoverageMapping &Coverage);
@@ -98,25 +108,22 @@ private:
   /// \brief If a demangler is available, demangle all symbol names.
   void demangleSymbols(const CoverageMapping &Coverage);
 
-  /// \brief Demangle \p Sym if possible. Otherwise, just return \p Sym.
-  StringRef getSymbolForHumans(StringRef Sym) const;
-
   /// \brief Write out a source file view to the filesystem.
   void writeSourceFileView(StringRef SourceFile, CoverageMapping *Coverage,
                            CoveragePrinter *Printer, bool ShowFilenames);
 
   typedef llvm::function_ref<int(int, const char **)> CommandLineParserType;
 
-  int show(int argc, const char **argv,
-           CommandLineParserType commandLineParser);
-
-  int report(int argc, const char **argv,
+  int doShow(int argc, const char **argv,
              CommandLineParserType commandLineParser);
 
-  int export_(int argc, const char **argv,
-              CommandLineParserType commandLineParser);
+  int doReport(int argc, const char **argv,
+               CommandLineParserType commandLineParser);
 
-  std::string ObjectFilename;
+  int doExport(int argc, const char **argv,
+               CommandLineParserType commandLineParser);
+
+  std::vector<StringRef> ObjectFilenames;
   CoverageViewOptions ViewOpts;
   CoverageFiltersMatchAll Filters;
 
@@ -126,26 +133,30 @@ private:
   /// A list of input source files.
   std::vector<std::string> SourceFiles;
 
-  /// Whether or not we're in -filename-equivalence mode.
-  bool CompareFilenamesOnly;
-
-  /// In -filename-equivalence mode, this maps absolute paths from the
-  /// coverage mapping data to input source files.
+  /// In -path-equivalence mode, this maps the absolute paths from the coverage
+  /// mapping data to the input source files.
   StringMap<std::string> RemappedFilenames;
 
+  /// The coverage data path to be remapped from, and the source path to be
+  /// remapped to, when using -path-equivalence.
+  Optional<std::pair<std::string, std::string>> PathRemapping;
+
   /// The architecture the coverage mapping data targets.
-  std::string CoverageArch;
+  std::vector<StringRef> CoverageArches;
 
-  /// A cache for demangled symbol names.
-  StringMap<std::string> DemangledNames;
+  /// A cache for demangled symbols.
+  DemangleCache DC;
 
-  /// Errors and warnings which have not been printed.
+  /// A lock which guards printing to stderr.
   std::mutex ErrsLock;
 
   /// A container for input source file buffers.
   std::mutex LoadedSourceFilesLock;
   std::vector<std::pair<std::string, std::unique_ptr<MemoryBuffer>>>
       LoadedSourceFiles;
+
+  /// Whitelist from -name-whitelist to be used for filtering.
+  std::unique_ptr<SpecialCaseList> NameWhitelist;
 };
 }
 
@@ -172,27 +183,23 @@ void CodeCoverageTool::warning(const Twine &Message, StringRef Whence) {
 }
 
 void CodeCoverageTool::addCollectedPath(const std::string &Path) {
-  if (CompareFilenamesOnly) {
-    SourceFiles.emplace_back(Path);
-  } else {
-    SmallString<128> EffectivePath(Path);
-    if (std::error_code EC = sys::fs::make_absolute(EffectivePath)) {
-      error(EC.message(), Path);
-      return;
-    }
-    sys::path::remove_dots(EffectivePath, /*remove_dot_dots=*/true);
-    SourceFiles.emplace_back(EffectivePath.str());
+  SmallString<128> EffectivePath(Path);
+  if (std::error_code EC = sys::fs::make_absolute(EffectivePath)) {
+    error(EC.message(), Path);
+    return;
   }
+  sys::path::remove_dots(EffectivePath, /*remove_dot_dots=*/true);
+  SourceFiles.emplace_back(EffectivePath.str());
 }
 
 void CodeCoverageTool::collectPaths(const std::string &Path) {
   llvm::sys::fs::file_status Status;
   llvm::sys::fs::status(Path, Status);
   if (!llvm::sys::fs::exists(Status)) {
-    if (CompareFilenamesOnly)
+    if (PathRemapping)
       addCollectedPath(Path);
     else
-      error("Missing source file", Path);
+      warning("Source file doesn't exist, proceeded by ignoring it.", Path);
     return;
   }
 
@@ -204,12 +211,16 @@ void CodeCoverageTool::collectPaths(const std::string &Path) {
   if (llvm::sys::fs::is_directory(Status)) {
     std::error_code EC;
     for (llvm::sys::fs::recursive_directory_iterator F(Path, EC), E;
-         F != E && !EC; F.increment(EC)) {
+         F != E; F.increment(EC)) {
+
+      if (EC) {
+        warning(EC.message(), F->path());
+        continue;
+      }
+
       if (llvm::sys::fs::is_regular_file(F->path()))
         addCollectedPath(F->path());
     }
-    if (EC)
-      warning(EC.message(), Path);
   }
 }
 
@@ -267,7 +278,7 @@ CodeCoverageTool::createFunctionView(const FunctionRecord &Function,
     return nullptr;
 
   auto Expansions = FunctionCoverage.getExpansions();
-  auto View = SourceCoverageView::create(getSymbolForHumans(Function.Name),
+  auto View = SourceCoverageView::create(DC.demangle(Function.Name),
                                          SourceBuffer.get(), ViewOpts,
                                          std::move(FunctionCoverage));
   attachExpansionSubViews(*View, Expansions, Coverage);
@@ -289,26 +300,34 @@ CodeCoverageTool::createSourceFileView(StringRef SourceFile,
   auto View = SourceCoverageView::create(SourceFile, SourceBuffer.get(),
                                          ViewOpts, std::move(FileCoverage));
   attachExpansionSubViews(*View, Expansions, Coverage);
+  if (!ViewOpts.ShowFunctionInstantiations)
+    return View;
 
-  for (const auto *Function : Coverage.getInstantiations(SourceFile)) {
-    std::unique_ptr<SourceCoverageView> SubView{nullptr};
+  for (const auto &Group : Coverage.getInstantiationGroups(SourceFile)) {
+    // Skip functions which have a single instantiation.
+    if (Group.size() < 2)
+      continue;
 
-    StringRef Funcname = getSymbolForHumans(Function->Name);
+    for (const FunctionRecord *Function : Group.getInstantiations()) {
+      std::unique_ptr<SourceCoverageView> SubView{nullptr};
 
-    if (Function->ExecutionCount > 0) {
-      auto SubViewCoverage = Coverage.getCoverageForFunction(*Function);
-      auto SubViewExpansions = SubViewCoverage.getExpansions();
-      SubView = SourceCoverageView::create(
-          Funcname, SourceBuffer.get(), ViewOpts, std::move(SubViewCoverage));
-      attachExpansionSubViews(*SubView, SubViewExpansions, Coverage);
+      StringRef Funcname = DC.demangle(Function->Name);
+
+      if (Function->ExecutionCount > 0) {
+        auto SubViewCoverage = Coverage.getCoverageForFunction(*Function);
+        auto SubViewExpansions = SubViewCoverage.getExpansions();
+        SubView = SourceCoverageView::create(
+            Funcname, SourceBuffer.get(), ViewOpts, std::move(SubViewCoverage));
+        attachExpansionSubViews(*SubView, SubViewExpansions, Coverage);
+      }
+
+      unsigned FileID = Function->CountedRegions.front().FileID;
+      unsigned Line = 0;
+      for (const auto &CR : Function->CountedRegions)
+        if (CR.FileID == FileID)
+          Line = std::max(CR.LineEnd, Line);
+      View->addInstantiation(Funcname, Line, std::move(SubView));
     }
-
-    unsigned FileID = Function->CountedRegions.front().FileID;
-    unsigned Line = 0;
-    for (const auto &CR : Function->CountedRegions)
-      if (CR.FileID == FileID)
-        Line = std::max(CR.LineEnd, Line);
-    View->addInstantiation(Funcname, Line, std::move(SubView));
   }
   return View;
 }
@@ -325,19 +344,38 @@ static bool modifiedTimeGT(StringRef LHS, StringRef RHS) {
 }
 
 std::unique_ptr<CoverageMapping> CodeCoverageTool::load() {
-  if (modifiedTimeGT(ObjectFilename, PGOFilename))
-    warning("profile data may be out of date - object is newer",
-            ObjectFilename);
+  for (StringRef ObjectFilename : ObjectFilenames)
+    if (modifiedTimeGT(ObjectFilename, PGOFilename))
+      warning("profile data may be out of date - object is newer",
+              ObjectFilename);
   auto CoverageOrErr =
-      CoverageMapping::load(ObjectFilename, PGOFilename, CoverageArch);
+      CoverageMapping::load(ObjectFilenames, PGOFilename, CoverageArches);
   if (Error E = CoverageOrErr.takeError()) {
-    error("Failed to load coverage: " + toString(std::move(E)), ObjectFilename);
+    error("Failed to load coverage: " + toString(std::move(E)),
+          join(ObjectFilenames.begin(), ObjectFilenames.end(), ", "));
     return nullptr;
   }
   auto Coverage = std::move(CoverageOrErr.get());
   unsigned Mismatched = Coverage->getMismatchedCount();
-  if (Mismatched)
-    warning(utostr(Mismatched) + " functions have mismatched data");
+  if (Mismatched) {
+    warning(Twine(Mismatched) + " functions have mismatched data");
+
+    if (ViewOpts.Debug) {
+      for (const auto &HashMismatch : Coverage->getHashMismatches())
+        errs() << "hash-mismatch: "
+               << "No profile record found for '" << HashMismatch.first << "'"
+               << " with hash = 0x" << Twine::utohexstr(HashMismatch.second)
+               << '\n';
+
+      for (const auto &CounterMismatch : Coverage->getCounterMismatches())
+        errs() << "counter-mismatch: "
+               << "Coverage mapping for " << CounterMismatch.first
+               << " only has " << CounterMismatch.second
+               << " valid counter expressions\n";
+    }
+  }
+
+  remapPathNames(*Coverage);
 
   if (!SourceFiles.empty())
     removeUnmappedInputs(*Coverage);
@@ -347,33 +385,58 @@ std::unique_ptr<CoverageMapping> CodeCoverageTool::load() {
   return Coverage;
 }
 
+void CodeCoverageTool::remapPathNames(const CoverageMapping &Coverage) {
+  if (!PathRemapping)
+    return;
+
+  // Convert remapping paths to native paths with trailing seperators.
+  auto nativeWithTrailing = [](StringRef Path) -> std::string {
+    if (Path.empty())
+      return "";
+    SmallString<128> NativePath;
+    sys::path::native(Path, NativePath);
+    if (!sys::path::is_separator(NativePath.back()))
+      NativePath += sys::path::get_separator();
+    return NativePath.c_str();
+  };
+  std::string RemapFrom = nativeWithTrailing(PathRemapping->first);
+  std::string RemapTo = nativeWithTrailing(PathRemapping->second);
+
+  // Create a mapping from coverage data file paths to local paths.
+  for (StringRef Filename : Coverage.getUniqueSourceFiles()) {
+    SmallString<128> NativeFilename;
+    sys::path::native(Filename, NativeFilename);
+    if (NativeFilename.startswith(RemapFrom)) {
+      RemappedFilenames[Filename] =
+          RemapTo + NativeFilename.substr(RemapFrom.size()).str();
+    }
+  }
+
+  // Convert input files from local paths to coverage data file paths.
+  StringMap<std::string> InvRemappedFilenames;
+  for (const auto &RemappedFilename : RemappedFilenames)
+    InvRemappedFilenames[RemappedFilename.getValue()] = RemappedFilename.getKey();
+
+  for (std::string &Filename : SourceFiles) {
+    SmallString<128> NativeFilename;
+    sys::path::native(Filename, NativeFilename);
+    auto CovFileName = InvRemappedFilenames.find(NativeFilename);
+    if (CovFileName != InvRemappedFilenames.end())
+      Filename = CovFileName->second;
+  }
+}
+
 void CodeCoverageTool::removeUnmappedInputs(const CoverageMapping &Coverage) {
   std::vector<StringRef> CoveredFiles = Coverage.getUniqueSourceFiles();
 
   auto UncoveredFilesIt = SourceFiles.end();
-  if (!CompareFilenamesOnly) {
-    // The user may have specified source files which aren't in the coverage
-    // mapping. Filter these files away.
-    UncoveredFilesIt = std::remove_if(
-        SourceFiles.begin(), SourceFiles.end(), [&](const std::string &SF) {
-          return !std::binary_search(CoveredFiles.begin(), CoveredFiles.end(),
-                                     SF);
-        });
-  } else {
-    for (auto &SF : SourceFiles) {
-      StringRef SFBase = sys::path::filename(SF);
-      for (const auto &CF : CoveredFiles) {
-        if (SFBase == sys::path::filename(CF)) {
-          RemappedFilenames[CF] = SF;
-          SF = CF;
-          break;
-        }
-      }
-    }
-    UncoveredFilesIt = std::remove_if(
-        SourceFiles.begin(), SourceFiles.end(),
-        [&](const std::string &SF) { return !RemappedFilenames.count(SF); });
-  }
+  // The user may have specified source files which aren't in the coverage
+  // mapping. Filter these files away.
+  UncoveredFilesIt = std::remove_if(
+      SourceFiles.begin(), SourceFiles.end(), [&](const std::string &SF) {
+        return !std::binary_search(CoveredFiles.begin(), CoveredFiles.end(),
+                                   SF);
+      });
 
   SourceFiles.erase(UncoveredFilesIt, SourceFiles.end());
 }
@@ -391,7 +454,7 @@ void CodeCoverageTool::demangleSymbols(const CoverageMapping &Coverage) {
     error(InputPath, EC.message());
     return;
   }
-  tool_output_file InputTOF{InputPath, InputFD};
+  ToolOutputFile InputTOF{InputPath, InputFD};
 
   unsigned NumSymbols = 0;
   for (const auto &Function : Coverage.getCoveredFunctions()) {
@@ -409,7 +472,7 @@ void CodeCoverageTool::demangleSymbols(const CoverageMapping &Coverage) {
     error(OutputPath, EC.message());
     return;
   }
-  tool_output_file OutputTOF{OutputPath, OutputFD};
+  ToolOutputFile OutputTOF{OutputPath, OutputFD};
   OutputTOF.os().close();
 
   // Invoke the demangler.
@@ -417,10 +480,7 @@ void CodeCoverageTool::demangleSymbols(const CoverageMapping &Coverage) {
   for (const std::string &Arg : ViewOpts.DemanglerOpts)
     ArgsV.push_back(Arg.c_str());
   ArgsV.push_back(nullptr);
-  StringRef InputPathRef = InputPath.str();
-  StringRef OutputPathRef = OutputPath.str();
-  StringRef StderrRef;
-  const StringRef *Redirects[] = {&InputPathRef, &OutputPathRef, &StderrRef};
+  Optional<StringRef> Redirects[] = {InputPath.str(), OutputPath.str(), {""}};
   std::string ErrMsg;
   int RC = sys::ExecuteAndWait(ViewOpts.DemanglerOpts[0], ArgsV.data(),
                                /*env=*/nullptr, Redirects, /*secondsToWait=*/0,
@@ -451,14 +511,9 @@ void CodeCoverageTool::demangleSymbols(const CoverageMapping &Coverage) {
   // Cache the demangled names.
   unsigned I = 0;
   for (const auto &Function : Coverage.getCoveredFunctions())
-    DemangledNames[Function.Name] = Symbols[I++];
-}
-
-StringRef CodeCoverageTool::getSymbolForHumans(StringRef Sym) const {
-  const auto DemangledName = DemangledNames.find(Sym);
-  if (DemangledName == DemangledNames.end())
-    return Sym;
-  return DemangledName->getValue();
+    // On Windows, lines in the demangler's output file end with "\r\n".
+    // Splitting by '\n' keeps '\r's, so cut them now.
+    DC.DemangledNames[Function.Name] = Symbols[I++].rtrim();
 }
 
 void CodeCoverageTool::writeSourceFileView(StringRef SourceFile,
@@ -479,14 +534,18 @@ void CodeCoverageTool::writeSourceFileView(StringRef SourceFile,
   auto OS = std::move(OSOrErr.get());
 
   View->print(*OS.get(), /*Wholefile=*/true,
-              /*ShowSourceName=*/ShowFilenames);
+              /*ShowSourceName=*/ShowFilenames,
+              /*ShowTitle=*/ViewOpts.hasOutputDirectory());
   Printer->closeViewFile(std::move(OS));
 }
 
 int CodeCoverageTool::run(Command Cmd, int argc, const char **argv) {
-  cl::opt<std::string, true> ObjectFilename(
-      cl::Positional, cl::Required, cl::location(this->ObjectFilename),
-      cl::desc("Covered executable or object file."));
+  cl::opt<std::string> CovFilename(
+      cl::Positional, cl::desc("Covered executable or object file."));
+
+  cl::list<std::string> CovFilenames(
+      "object", cl::desc("Coverage executable or object file"), cl::ZeroOrMore,
+      cl::CommaSeparated);
 
   cl::list<std::string> InputSourceFiles(
       cl::Positional, cl::desc("<Source files>"), cl::ZeroOrMore);
@@ -500,8 +559,8 @@ int CodeCoverageTool::run(Command Cmd, int argc, const char **argv) {
       cl::desc(
           "File with the profile data obtained after an instrumented run"));
 
-  cl::opt<std::string> Arch(
-      "arch", cl::desc("architecture of the coverage mapping binary"));
+  cl::list<std::string> Arches(
+      "arch", cl::desc("architectures of the coverage mapping binaries"));
 
   cl::opt<bool> DebugDump("dump", cl::Optional,
                           cl::desc("Show internal debug dump"));
@@ -514,16 +573,22 @@ int CodeCoverageTool::run(Command Cmd, int argc, const char **argv) {
                             "HTML output")),
       cl::init(CoverageViewOptions::OutputFormat::Text));
 
-  cl::opt<bool> FilenameEquivalence(
-      "filename-equivalence", cl::Optional,
-      cl::desc("Treat source files as equivalent to paths in the coverage data "
-               "when the file names match, even if the full paths do not"));
+  cl::opt<std::string> PathRemap(
+      "path-equivalence", cl::Optional,
+      cl::desc("<from>,<to> Map coverage data paths to local source file "
+               "paths"));
 
   cl::OptionCategory FilteringCategory("Function filtering options");
 
   cl::list<std::string> NameFilters(
       "name", cl::Optional,
       cl::desc("Show code coverage only for functions with the given name"),
+      cl::ZeroOrMore, cl::cat(FilteringCategory));
+
+  cl::list<std::string> NameFilterFiles(
+      "name-whitelist", cl::Optional,
+      cl::desc("Show code coverage only for functions listed in the given "
+               "file"),
       cl::ZeroOrMore, cl::cat(FilteringCategory));
 
   cl::list<std::string> NameRegexFilters(
@@ -563,19 +628,39 @@ int CodeCoverageTool::run(Command Cmd, int argc, const char **argv) {
   cl::list<std::string> DemanglerOpts(
       "Xdemangler", cl::desc("<demangler-path>|<demangler-option>"));
 
+  cl::opt<bool> RegionSummary(
+      "show-region-summary", cl::Optional,
+      cl::desc("Show region statistics in summary table"),
+      cl::init(true));
+
+  cl::opt<bool> InstantiationSummary(
+      "show-instantiation-summary", cl::Optional,
+      cl::desc("Show instantiation statistics in summary table"));
+
+  cl::opt<bool> SummaryOnly(
+      "summary-only", cl::Optional,
+      cl::desc("Export only summary information for each source file"));
+
+  cl::opt<unsigned> NumThreads(
+      "num-threads", cl::init(0),
+      cl::desc("Number of merge threads to use (default: autodetect)"));
+  cl::alias NumThreadsA("j", cl::desc("Alias for --num-threads"),
+                        cl::aliasopt(NumThreads));
+
   auto commandLineParser = [&, this](int argc, const char **argv) -> int {
     cl::ParseCommandLineOptions(argc, argv, "LLVM code coverage tool\n");
     ViewOpts.Debug = DebugDump;
-    CompareFilenamesOnly = FilenameEquivalence;
+
+    if (!CovFilename.empty())
+      ObjectFilenames.emplace_back(CovFilename);
+    for (const std::string &Filename : CovFilenames)
+      ObjectFilenames.emplace_back(Filename);
+    if (ObjectFilenames.empty()) {
+      errs() << "No filenames specified!\n";
+      ::exit(1);
+    }
 
     ViewOpts.Format = Format;
-    SmallString<128> ObjectFilePath(this->ObjectFilename);
-    if (std::error_code EC = sys::fs::make_absolute(ObjectFilePath)) {
-      error(EC.message(), this->ObjectFilename);
-      return 1;
-    }
-    sys::path::native(ObjectFilePath);
-    ViewOpts.ObjectFilename = ObjectFilePath.c_str();
     switch (ViewOpts.Format) {
     case CoverageViewOptions::OutputFormat::Text:
       ViewOpts.Colors = UseColor == cl::BOU_UNSET
@@ -584,10 +669,16 @@ int CodeCoverageTool::run(Command Cmd, int argc, const char **argv) {
       break;
     case CoverageViewOptions::OutputFormat::HTML:
       if (UseColor == cl::BOU_FALSE)
-        error("Color output cannot be disabled when generating html.");
+        errs() << "Color output cannot be disabled when generating html.\n";
       ViewOpts.Colors = true;
       break;
     }
+
+    // If path-equivalence was given and is a comma seperated pair then set
+    // PathRemapping.
+    auto EquivPair = StringRef(PathRemap).split(',');
+    if (!(EquivPair.first.empty() && EquivPair.second.empty()))
+      PathRemapping = EquivPair;
 
     // If a demangler is supplied, check if it exists and register it.
     if (DemanglerOpts.size()) {
@@ -601,21 +692,33 @@ int CodeCoverageTool::run(Command Cmd, int argc, const char **argv) {
       ViewOpts.DemanglerOpts.swap(DemanglerOpts);
     }
 
+    // Read in -name-whitelist files.
+    if (!NameFilterFiles.empty()) {
+      std::string SpecialCaseListErr;
+      NameWhitelist =
+          SpecialCaseList::create(NameFilterFiles, SpecialCaseListErr);
+      if (!NameWhitelist)
+        error(SpecialCaseListErr);
+    }
+
     // Create the function filters
-    if (!NameFilters.empty() || !NameRegexFilters.empty()) {
-      auto NameFilterer = new CoverageFilters;
+    if (!NameFilters.empty() || NameWhitelist || !NameRegexFilters.empty()) {
+      auto NameFilterer = llvm::make_unique<CoverageFilters>();
       for (const auto &Name : NameFilters)
         NameFilterer->push_back(llvm::make_unique<NameCoverageFilter>(Name));
+      if (NameWhitelist)
+        NameFilterer->push_back(
+            llvm::make_unique<NameWhitelistCoverageFilter>(*NameWhitelist));
       for (const auto &Regex : NameRegexFilters)
         NameFilterer->push_back(
             llvm::make_unique<NameRegexCoverageFilter>(Regex));
-      Filters.push_back(std::unique_ptr<CoverageFilter>(NameFilterer));
+      Filters.push_back(std::move(NameFilterer));
     }
     if (RegionCoverageLtFilter.getNumOccurrences() ||
         RegionCoverageGtFilter.getNumOccurrences() ||
         LineCoverageLtFilter.getNumOccurrences() ||
         LineCoverageGtFilter.getNumOccurrences()) {
-      auto StatFilterer = new CoverageFilters;
+      auto StatFilterer = llvm::make_unique<CoverageFilters>();
       if (RegionCoverageLtFilter.getNumOccurrences())
         StatFilterer->push_back(llvm::make_unique<RegionCoverageFilter>(
             RegionCoverageFilter::LessThan, RegionCoverageLtFilter));
@@ -628,15 +731,22 @@ int CodeCoverageTool::run(Command Cmd, int argc, const char **argv) {
       if (LineCoverageGtFilter.getNumOccurrences())
         StatFilterer->push_back(llvm::make_unique<LineCoverageFilter>(
             RegionCoverageFilter::GreaterThan, LineCoverageGtFilter));
-      Filters.push_back(std::unique_ptr<CoverageFilter>(StatFilterer));
+      Filters.push_back(std::move(StatFilterer));
     }
 
-    if (!Arch.empty() &&
-        Triple(Arch).getArch() == llvm::Triple::ArchType::UnknownArch) {
-      error("Unknown architecture: " + Arch);
-      return 1;
+    if (!Arches.empty()) {
+      for (const std::string &Arch : Arches) {
+        if (Triple(Arch).getArch() == llvm::Triple::ArchType::UnknownArch) {
+          error("Unknown architecture: " + Arch);
+          return 1;
+        }
+        CoverageArches.emplace_back(Arch);
+      }
+      if (CoverageArches.size() != ObjectFilenames.size()) {
+        error("Number of architectures doesn't match the number of objects");
+        return 1;
+      }
     }
-    CoverageArch = Arch;
 
     for (const std::string &File : InputSourceFiles)
       collectPaths(File);
@@ -647,22 +757,27 @@ int CodeCoverageTool::run(Command Cmd, int argc, const char **argv) {
       ::exit(0);
     }
 
+    ViewOpts.ShowRegionSummary = RegionSummary;
+    ViewOpts.ShowInstantiationSummary = InstantiationSummary;
+    ViewOpts.ExportSummaryOnly = SummaryOnly;
+    ViewOpts.NumThreads = NumThreads;
+
     return 0;
   };
 
   switch (Cmd) {
   case Show:
-    return show(argc, argv, commandLineParser);
+    return doShow(argc, argv, commandLineParser);
   case Report:
-    return report(argc, argv, commandLineParser);
+    return doReport(argc, argv, commandLineParser);
   case Export:
-    return export_(argc, argv, commandLineParser);
+    return doExport(argc, argv, commandLineParser);
   }
   return 0;
 }
 
-int CodeCoverageTool::show(int argc, const char **argv,
-                           CommandLineParserType commandLineParser) {
+int CodeCoverageTool::doShow(int argc, const char **argv,
+                             CommandLineParserType commandLineParser) {
 
   cl::OptionCategory ViewCategory("Viewing options");
 
@@ -688,7 +803,7 @@ int CodeCoverageTool::show(int argc, const char **argv,
 
   cl::opt<bool> ShowInstantiations("show-instantiations", cl::Optional,
                                    cl::desc("Show function instantiations"),
-                                   cl::cat(ViewCategory));
+                                   cl::init(true), cl::cat(ViewCategory));
 
   cl::opt<std::string> ShowOutputDirectory(
       "output-dir", cl::init(""),
@@ -713,7 +828,6 @@ int CodeCoverageTool::show(int argc, const char **argv,
   ViewOpts.ShowLineStats = ShowLineExecutionCounts.getNumOccurrences() != 0 ||
                            !ShowRegions || ShowBestLineRegionsCounts;
   ViewOpts.ShowRegionMarkers = ShowRegions || ShowBestLineRegionsCounts;
-  ViewOpts.ShowLineStatsOrRegionMarkers = ShowBestLineRegionsCounts;
   ViewOpts.ShowExpandedRegions = ShowExpansions;
   ViewOpts.ShowFunctionInstantiations = ShowInstantiations;
   ViewOpts.ShowOutputDirectory = ShowOutputDirectory;
@@ -734,8 +848,8 @@ int CodeCoverageTool::show(int argc, const char **argv,
   }
 
   auto ModifiedTime = Status.getLastModificationTime();
-  std::string ModifiedTimeStr = ModifiedTime.str();
-  size_t found = ModifiedTimeStr.rfind(":");
+  std::string ModifiedTimeStr = to_string(ModifiedTime);
+  size_t found = ModifiedTimeStr.rfind(':');
   ViewOpts.CreatedTimeStr = (found != std::string::npos)
                                 ? "Created: " + ModifiedTimeStr.substr(0, found)
                                 : "Created: " + ModifiedTimeStr;
@@ -746,29 +860,54 @@ int CodeCoverageTool::show(int argc, const char **argv,
 
   auto Printer = CoveragePrinter::create(ViewOpts);
 
-  if (!Filters.empty()) {
-    auto OSOrErr = Printer->createViewFile("functions", /*InToplevel=*/true);
-    if (Error E = OSOrErr.takeError()) {
-      error("Could not create view file!", toString(std::move(E)));
+  if (SourceFiles.empty())
+    // Get the source files from the function coverage mapping.
+    for (StringRef Filename : Coverage->getUniqueSourceFiles())
+      SourceFiles.push_back(Filename);
+
+  // Create an index out of the source files.
+  if (ViewOpts.hasOutputDirectory()) {
+    if (Error E = Printer->createIndexFile(SourceFiles, *Coverage, Filters)) {
+      error("Could not create index file!", toString(std::move(E)));
       return 1;
     }
-    auto OS = std::move(OSOrErr.get());
+  }
 
-    // Show functions.
-    for (const auto &Function : Coverage->getCoveredFunctions()) {
-      if (!Filters.matches(Function))
-        continue;
+  if (!Filters.empty()) {
+    // Build the map of filenames to functions.
+    std::map<llvm::StringRef, std::vector<const FunctionRecord *>>
+        FilenameFunctionMap;
+    for (const auto &SourceFile : SourceFiles)
+      for (const auto &Function : Coverage->getCoveredFunctions(SourceFile))
+        if (Filters.matches(*Coverage.get(), Function))
+          FilenameFunctionMap[SourceFile].push_back(&Function);
 
-      auto mainView = createFunctionView(Function, *Coverage);
-      if (!mainView) {
-        warning("Could not read coverage for '" + Function.Name + "'.");
-        continue;
+    // Only print filter matching functions for each file.
+    for (const auto &FileFunc : FilenameFunctionMap) {
+      StringRef File = FileFunc.first;
+      const auto &Functions = FileFunc.second;
+
+      auto OSOrErr = Printer->createViewFile(File, /*InToplevel=*/false);
+      if (Error E = OSOrErr.takeError()) {
+        error("Could not create view file!", toString(std::move(E)));
+        return 1;
+      }
+      auto OS = std::move(OSOrErr.get());
+
+      bool ShowTitle = ViewOpts.hasOutputDirectory();
+      for (const auto *Function : Functions) {
+        auto FunctionView = createFunctionView(*Function, *Coverage);
+        if (!FunctionView) {
+          warning("Could not read coverage for '" + Function->Name + "'.");
+          continue;
+        }
+        FunctionView->print(*OS.get(), /*WholeFile=*/false,
+                            /*ShowSourceName=*/true, ShowTitle);
+        ShowTitle = false;
       }
 
-      mainView->print(*OS.get(), /*WholeFile=*/false, /*ShowSourceName=*/true);
+      Printer->closeViewFile(std::move(OS));
     }
-
-    Printer->closeViewFile(std::move(OS));
     return 0;
   }
 
@@ -777,28 +916,21 @@ int CodeCoverageTool::show(int argc, const char **argv,
       (SourceFiles.size() != 1) || ViewOpts.hasOutputDirectory() ||
       (ViewOpts.Format == CoverageViewOptions::OutputFormat::HTML);
 
-  if (SourceFiles.empty())
-    // Get the source files from the function coverage mapping.
-    for (StringRef Filename : Coverage->getUniqueSourceFiles())
-      SourceFiles.push_back(Filename);
+  auto NumThreads = ViewOpts.NumThreads;
 
-  // Create an index out of the source files.
-  if (ViewOpts.hasOutputDirectory()) {
-    if (Error E = Printer->createIndexFile(SourceFiles, *Coverage)) {
-      error("Could not create index file!", toString(std::move(E)));
-      return 1;
-    }
-  }
+  // If NumThreads is not specified, auto-detect a good default.
+  if (NumThreads == 0)
+    NumThreads =
+        std::max(1U, std::min(llvm::heavyweight_hardware_concurrency(),
+                              unsigned(SourceFiles.size())));
 
-  // FIXME: Sink the hardware_concurrency() == 1 check into ThreadPool.
-  if (!ViewOpts.hasOutputDirectory() ||
-      std::thread::hardware_concurrency() == 1) {
+  if (!ViewOpts.hasOutputDirectory() || NumThreads == 1) {
     for (const std::string &SourceFile : SourceFiles)
       writeSourceFileView(SourceFile, Coverage.get(), Printer.get(),
                           ShowFilenames);
   } else {
     // In -output-dir mode, it's safe to use multiple threads to print files.
-    ThreadPool Pool;
+    ThreadPool Pool(NumThreads);
     for (const std::string &SourceFile : SourceFiles)
       Pool.async(&CodeCoverageTool::writeSourceFileView, this, SourceFile,
                  Coverage.get(), Printer.get(), ShowFilenames);
@@ -808,33 +940,54 @@ int CodeCoverageTool::show(int argc, const char **argv,
   return 0;
 }
 
-int CodeCoverageTool::report(int argc, const char **argv,
-                             CommandLineParserType commandLineParser) {
+int CodeCoverageTool::doReport(int argc, const char **argv,
+                               CommandLineParserType commandLineParser) {
+  cl::opt<bool> ShowFunctionSummaries(
+      "show-functions", cl::Optional, cl::init(false),
+      cl::desc("Show coverage summaries for each function"));
+
   auto Err = commandLineParser(argc, argv);
   if (Err)
     return Err;
 
-  if (ViewOpts.Format == CoverageViewOptions::OutputFormat::HTML)
+  if (ViewOpts.Format == CoverageViewOptions::OutputFormat::HTML) {
     error("HTML output for summary reports is not yet supported.");
+    return 1;
+  }
 
   auto Coverage = load();
   if (!Coverage)
     return 1;
 
   CoverageReport Report(ViewOpts, *Coverage.get());
-  if (SourceFiles.empty())
-    Report.renderFileReports(llvm::outs());
-  else
-    Report.renderFunctionReports(SourceFiles, llvm::outs());
+  if (!ShowFunctionSummaries) {
+    if (SourceFiles.empty())
+      Report.renderFileReports(llvm::outs());
+    else
+      Report.renderFileReports(llvm::outs(), SourceFiles);
+  } else {
+    if (SourceFiles.empty()) {
+      error("Source files must be specified when -show-functions=true is "
+            "specified");
+      return 1;
+    }
+
+    Report.renderFunctionReports(SourceFiles, DC, llvm::outs());
+  }
   return 0;
 }
 
-int CodeCoverageTool::export_(int argc, const char **argv,
-                              CommandLineParserType commandLineParser) {
+int CodeCoverageTool::doExport(int argc, const char **argv,
+                               CommandLineParserType commandLineParser) {
 
   auto Err = commandLineParser(argc, argv);
   if (Err)
     return Err;
+
+  if (ViewOpts.Format != CoverageViewOptions::OutputFormat::Text) {
+    error("Coverage data can only be exported as textual JSON.");
+    return 1;
+  }
 
   auto Coverage = load();
   if (!Coverage) {
@@ -842,7 +995,12 @@ int CodeCoverageTool::export_(int argc, const char **argv,
     return 1;
   }
 
-  exportCoverageDataToJson(ObjectFilename, *Coverage.get(), outs());
+  auto Exporter = CoverageExporterJson(*Coverage.get(), ViewOpts, outs());
+
+  if (SourceFiles.empty())
+    Exporter.renderRoot();
+  else
+    Exporter.renderRoot(SourceFiles);
 
   return 0;
 }

@@ -23,14 +23,25 @@
 #include "llvm/ProfileData/SampleProfReader.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/STLExtras.h"
-#include "llvm/Support/Debug.h"
+#include "llvm/ADT/StringRef.h"
+#include "llvm/IR/ProfileSummary.h"
+#include "llvm/ProfileData/ProfileCommon.h"
+#include "llvm/ProfileData/SampleProf.h"
 #include "llvm/Support/ErrorOr.h"
 #include "llvm/Support/LEB128.h"
 #include "llvm/Support/LineIterator.h"
 #include "llvm/Support/MemoryBuffer.h"
+#include "llvm/Support/raw_ostream.h"
+#include <algorithm>
+#include <cstddef>
+#include <cstdint>
+#include <limits>
+#include <memory>
+#include <system_error>
+#include <vector>
 
-using namespace llvm::sampleprof;
 using namespace llvm;
+using namespace sampleprof;
 
 /// \brief Dump the function profile for \p FName.
 ///
@@ -116,19 +127,52 @@ static bool ParseLine(const StringRef &Input, bool &IsCallsite, uint32_t &Depth,
       if (Rest.substr(0, n3).getAsInteger(10, NumSamples))
         return false;
     }
+    // Find call targets and their sample counts.
+    // Note: In some cases, there are symbols in the profile which are not
+    // mangled. To accommodate such cases, use colon + integer pairs as the
+    // anchor points.
+    // An example:
+    // _M_construct<char *>:1000 string_view<std::allocator<char> >:437
+    // ":1000" and ":437" are used as anchor points so the string above will
+    // be interpreted as
+    // target: _M_construct<char *>
+    // count: 1000
+    // target: string_view<std::allocator<char> >
+    // count: 437
     while (n3 != StringRef::npos) {
       n3 += Rest.substr(n3).find_first_not_of(' ');
       Rest = Rest.substr(n3);
-      n3 = Rest.find(' ');
-      StringRef pair = Rest;
-      if (n3 != StringRef::npos) {
-        pair = Rest.substr(0, n3);
-      }
-      size_t n4 = pair.find(':');
-      uint64_t count;
-      if (pair.substr(n4 + 1).getAsInteger(10, count))
+      n3 = Rest.find_first_of(':');
+      if (n3 == StringRef::npos || n3 == 0)
         return false;
-      TargetCountMap[pair.substr(0, n4)] = count;
+
+      StringRef Target;
+      uint64_t count, n4;
+      while (true) {
+        // Get the segment after the current colon.
+        StringRef AfterColon = Rest.substr(n3 + 1);
+        // Get the target symbol before the current colon.
+        Target = Rest.substr(0, n3);
+        // Check if the word after the current colon is an integer.
+        n4 = AfterColon.find_first_of(' ');
+        n4 = (n4 != StringRef::npos) ? n3 + n4 + 1 : Rest.size();
+        StringRef WordAfterColon = Rest.substr(n3 + 1, n4 - n3 - 1);
+        if (!WordAfterColon.getAsInteger(10, count))
+          break;
+
+        // Try to find the next colon.
+        uint64_t n5 = AfterColon.find_first_of(':');
+        if (n5 == StringRef::npos)
+          return false;
+        n3 += n5 + 1;
+      }
+
+      // An anchor point is found. Save the {target, count} pair
+      TargetCountMap[Target] = count;
+      if (n4 == Rest.size())
+        break;
+      // Change n3 to the next blank space after colon + integer pair.
+      n3 = n4;
     }
   } else {
     IsCallsite = true;
@@ -200,7 +244,7 @@ std::error_code SampleProfileReaderText::read() {
           InlineStack.pop_back();
         }
         FunctionSamples &FSamples = InlineStack.back()->functionSamplesAt(
-            LineLocation(LineOffset, Discriminator));
+            LineLocation(LineOffset, Discriminator))[FName];
         FSamples.setName(FName);
         MergeResult(Result, FSamples.addTotalSamples(NumSamples));
         InlineStack.push_back(&FSamples);
@@ -352,8 +396,8 @@ SampleProfileReaderBinary::readProfile(FunctionSamples &FProfile) {
     if (std::error_code EC = FName.getError())
       return EC;
 
-    FunctionSamples &CalleeProfile =
-        FProfile.functionSamplesAt(LineLocation(*LineOffset, *Discriminator));
+    FunctionSamples &CalleeProfile = FProfile.functionSamplesAt(
+        LineLocation(*LineOffset, *Discriminator))[*FName];
     CalleeProfile.setName(*FName);
     if (std::error_code EC = readProfile(CalleeProfile))
       return EC;
@@ -625,7 +669,7 @@ std::error_code SampleProfileReaderGCC::readOneFunctionProfile(
     uint32_t LineOffset = Offset >> 16;
     uint32_t Discriminator = Offset & 0xffff;
     FProfile = &CallerProfile->functionSamplesAt(
-        LineLocation(LineOffset, Discriminator));
+        LineLocation(LineOffset, Discriminator))[Name];
   }
   FProfile->setName(Name);
 
@@ -681,11 +725,9 @@ std::error_code SampleProfileReaderGCC::readOneFunctionProfile(
       if (!GcovBuffer.readInt64(TargetCount))
         return sampleprof_error::truncated;
 
-      if (Update) {
-        FunctionSamples &TargetProfile = Profiles[TargetName];
-        TargetProfile.addCalledTargetSamples(LineOffset, Discriminator,
-                                             TargetName, TargetCount);
-      }
+      if (Update)
+        FProfile->addCalledTargetSamples(LineOffset, Discriminator,
+                                         TargetName, TargetCount);
     }
   }
 
@@ -740,7 +782,7 @@ setupMemoryBuffer(const Twine &Filename) {
   auto Buffer = std::move(BufferOrErr.get());
 
   // Sanity check the file.
-  if (Buffer->getBufferSize() > std::numeric_limits<uint32_t>::max())
+  if (uint64_t(Buffer->getBufferSize()) > std::numeric_limits<uint32_t>::max())
     return sampleprof_error::too_large;
 
   return std::move(Buffer);
@@ -749,8 +791,6 @@ setupMemoryBuffer(const Twine &Filename) {
 /// \brief Create a sample profile reader based on the format of the input file.
 ///
 /// \param Filename The file to open.
-///
-/// \param Reader The reader to instantiate according to \p Filename's format.
 ///
 /// \param C The LLVM context to use to emit diagnostics.
 ///
@@ -766,8 +806,6 @@ SampleProfileReader::create(const Twine &Filename, LLVMContext &C) {
 /// \brief Create a sample profile reader based on the format of the input data.
 ///
 /// \param B The memory buffer to create the reader from (assumes ownership).
-///
-/// \param Reader The reader to instantiate according to \p Filename's format.
 ///
 /// \param C The LLVM context to use to emit diagnostics.
 ///

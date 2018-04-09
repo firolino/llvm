@@ -24,14 +24,7 @@
 #include <psapi.h>
 #include <shellapi.h>
 
-#ifdef __MINGW32__
- #if (HAVE_LIBPSAPI != 1)
-  #error "libpsapi.a should be present"
- #endif
- #if (HAVE_LIBSHELL32 != 1)
-  #error "libshell32.a should be present"
- #endif
-#else
+#if !defined(__MINGW32__)
  #pragma comment(lib, "psapi.lib")
  #pragma comment(lib, "shell32.lib")
 #endif
@@ -47,19 +40,6 @@
 #endif
 
 using namespace llvm;
-using namespace sys;
-
-static TimeValue getTimeValueFromFILETIME(FILETIME Time) {
-  ULARGE_INTEGER TimeInteger;
-  TimeInteger.LowPart = Time.dwLowDateTime;
-  TimeInteger.HighPart = Time.dwHighDateTime;
-
-  // FILETIME's are # of 100 nanosecond ticks (1/10th of a microsecond)
-  return TimeValue(
-      static_cast<TimeValue::SecondsType>(TimeInteger.QuadPart / 10000000),
-      static_cast<TimeValue::NanoSecondsType>(
-          (TimeInteger.QuadPart % 10000000) * 100));
-}
 
 // This function retrieves the page size using GetNativeSystemInfo() and is
 // present solely so it can be called once to initialize the self_process member
@@ -93,17 +73,17 @@ Process::GetMallocUsage()
   return size;
 }
 
-void Process::GetTimeUsage(TimeValue &elapsed, TimeValue &user_time,
-                           TimeValue &sys_time) {
-  elapsed = TimeValue::now();
+void Process::GetTimeUsage(TimePoint<> &elapsed, std::chrono::nanoseconds &user_time,
+                           std::chrono::nanoseconds &sys_time) {
+  elapsed = std::chrono::system_clock::now();;
 
   FILETIME ProcCreate, ProcExit, KernelTime, UserTime;
   if (GetProcessTimes(GetCurrentProcess(), &ProcCreate, &ProcExit, &KernelTime,
                       &UserTime) == 0)
     return;
 
-  user_time = getTimeValueFromFILETIME(UserTime);
-  sys_time = getTimeValueFromFILETIME(KernelTime);
+  user_time = toDuration(UserTime);
+  sys_time = toDuration(KernelTime);
 }
 
 // Some LLVM programs such as bugpoint produce core files as a normal part of
@@ -142,9 +122,10 @@ Optional<std::string> Process::GetEnv(StringRef Name) {
   size_t Size = MAX_PATH;
   do {
     Buf.reserve(Size);
+    SetLastError(NO_ERROR);
     Size =
-        GetEnvironmentVariableW(NameUTF16.data(), Buf.data(), Buf.capacity());
-    if (Size == 0)
+      GetEnvironmentVariableW(NameUTF16.data(), Buf.data(), Buf.capacity());
+    if (Size == 0 && GetLastError() == ERROR_ENVVAR_NOT_FOUND)
       return None;
 
     // Try again with larger buffer.

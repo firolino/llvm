@@ -72,15 +72,16 @@ public:
     const ConstantFP *getConstantFP() const { return Constant.CFP; }
     const ConstantInt *getConstantInt() const { return Constant.CIP; }
     MachineLocation getLoc() const { return Loc; }
-    bool isBitPiece() const { return getExpression()->isBitPiece(); }
+    bool isFragment() const { return getExpression()->isFragment(); }
     const DIExpression *getExpression() const { return Expression; }
     friend bool operator==(const Value &, const Value &);
     friend bool operator<(const Value &, const Value &);
-    void dump() const {
+#if !defined(NDEBUG) || defined(LLVM_ENABLE_DUMP)
+    LLVM_DUMP_METHOD void dump() const {
       if (isLocation()) {
         llvm::dbgs() << "Loc = { reg=" << Loc.getReg() << " ";
         if (Loc.isIndirect())
-          llvm::dbgs() << '+' << Loc.getOffset();
+          llvm::dbgs() << "+0";
         llvm::dbgs() << "} ";
       }
       else if (isConstantInt())
@@ -90,6 +91,7 @@ public:
       if (Expression)
         Expression->dump();
     }
+#endif
   };
 
 private:
@@ -129,14 +131,14 @@ public:
     Values.append(Vals.begin(), Vals.end());
     sortUniqueValues();
     assert(all_of(Values, [](DebugLocEntry::Value V) {
-          return V.isBitPiece();
+          return V.isFragment();
         }) && "value must be a piece");
   }
 
   // \brief Sort the pieces by offset.
   // Remove any duplicate entries by dropping all but the first.
   void sortUniqueValues() {
-    std::sort(Values.begin(), Values.end());
+    llvm::sort(Values.begin(), Values.end());
     Values.erase(
         std::unique(
             Values.begin(), Values.end(), [](const Value &A, const Value &B) {
@@ -172,11 +174,11 @@ inline bool operator==(const DebugLocEntry::Value &A,
   llvm_unreachable("unhandled EntryKind");
 }
 
-/// \brief Compare two pieces based on their offset.
+/// Compare two fragments based on their offset.
 inline bool operator<(const DebugLocEntry::Value &A,
                       const DebugLocEntry::Value &B) {
-  return A.getExpression()->getBitPieceOffset() <
-         B.getExpression()->getBitPieceOffset();
+  return A.getExpression()->getFragmentInfo()->OffsetInBits <
+         B.getExpression()->getFragmentInfo()->OffsetInBits;
 }
 
 }

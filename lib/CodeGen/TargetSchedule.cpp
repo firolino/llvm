@@ -1,4 +1,4 @@
-//===-- llvm/Target/TargetSchedule.cpp - Sched Machine Model ----*- C++ -*-===//
+//===- llvm/Target/TargetSchedule.cpp - Sched Machine Model ---------------===//
 //
 //                     The LLVM Compiler Infrastructure
 //
@@ -13,11 +13,21 @@
 //===----------------------------------------------------------------------===//
 
 #include "llvm/CodeGen/TargetSchedule.h"
+#include "llvm/CodeGen/MachineFunction.h"
+#include "llvm/CodeGen/MachineInstr.h"
+#include "llvm/CodeGen/MachineOperand.h"
+#include "llvm/CodeGen/TargetInstrInfo.h"
+#include "llvm/CodeGen/TargetRegisterInfo.h"
+#include "llvm/CodeGen/TargetSubtargetInfo.h"
+#include "llvm/MC/MCInstrDesc.h"
+#include "llvm/MC/MCInstrItineraries.h"
+#include "llvm/MC/MCSchedule.h"
 #include "llvm/Support/CommandLine.h"
+#include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/raw_ostream.h"
-#include "llvm/Target/TargetInstrInfo.h"
-#include "llvm/Target/TargetRegisterInfo.h"
-#include "llvm/Target/TargetSubtargetInfo.h"
+#include <algorithm>
+#include <cassert>
+#include <cstdint>
 
 using namespace llvm;
 
@@ -37,25 +47,24 @@ bool TargetSchedModel::hasInstrItineraries() const {
 
 static unsigned gcd(unsigned Dividend, unsigned Divisor) {
   // Dividend and Divisor will be naturally swapped as needed.
-  while(Divisor) {
+  while (Divisor) {
     unsigned Rem = Dividend % Divisor;
     Dividend = Divisor;
     Divisor = Rem;
   };
   return Dividend;
 }
+
 static unsigned lcm(unsigned A, unsigned B) {
   unsigned LCM = (uint64_t(A) * B) / gcd(A, B);
   assert((LCM >= A && LCM >= B) && "LCM overflow");
   return LCM;
 }
 
-void TargetSchedModel::init(const MCSchedModel &sm,
-                            const TargetSubtargetInfo *sti,
-                            const TargetInstrInfo *tii) {
-  SchedModel = sm;
-  STI = sti;
-  TII = tii;
+void TargetSchedModel::init(const TargetSubtargetInfo *TSInfo) {
+  STI = TSInfo;
+  SchedModel = TSInfo->getSchedModel();
+  TII = TSInfo->getInstrInfo();
   STI->initInstrItins(InstrItins);
 
   unsigned NumRes = SchedModel.getNumProcResourceKinds();
@@ -71,6 +80,29 @@ void TargetSchedModel::init(const MCSchedModel &sm,
     unsigned NumUnits = SchedModel.getProcResource(Idx)->NumUnits;
     ResourceFactors[Idx] = NumUnits ? (ResourceLCM / NumUnits) : 0;
   }
+}
+
+/// Returns true only if instruction is specified as single issue.
+bool TargetSchedModel::mustBeginGroup(const MachineInstr *MI,
+                                     const MCSchedClassDesc *SC) const {
+  if (hasInstrSchedModel()) {
+    if (!SC)
+      SC = resolveSchedClass(MI);
+    if (SC->isValid())
+      return SC->BeginGroup;
+  }
+  return false;
+}
+
+bool TargetSchedModel::mustEndGroup(const MachineInstr *MI,
+                                     const MCSchedClassDesc *SC) const {
+  if (hasInstrSchedModel()) {
+    if (!SC)
+      SC = resolveSchedClass(MI);
+    if (SC->isValid())
+      return SC->EndGroup;
+  }
+  return false;
 }
 
 unsigned TargetSchedModel::getNumMicroOps(const MachineInstr *MI,
@@ -100,7 +132,6 @@ static unsigned capLatency(int Cycles) {
 /// evaluation of predicates that depend on instruction operands or flags.
 const MCSchedClassDesc *TargetSchedModel::
 resolveSchedClass(const MachineInstr *MI) const {
-
   // Get the definition's scheduling class descriptor from this machine model.
   unsigned SchedClass = MI->getDesc().getSchedClass();
   const MCSchedClassDesc *SCDesc = SchedModel.getSchedClassDesc(SchedClass);
@@ -224,15 +255,7 @@ unsigned TargetSchedModel::computeOperandLatency(
 
 unsigned
 TargetSchedModel::computeInstrLatency(const MCSchedClassDesc &SCDesc) const {
-  unsigned Latency = 0;
-  for (unsigned DefIdx = 0, DefEnd = SCDesc.NumWriteLatencyEntries;
-       DefIdx != DefEnd; ++DefIdx) {
-    // Lookup the definition's write latency in SubtargetInfo.
-    const MCWriteLatencyEntry *WLEntry =
-      STI->getWriteLatencyEntry(&SCDesc, DefIdx);
-    Latency = std::max(Latency, capLatency(WLEntry->Cycles));
-  }
-  return Latency;
+  return capLatency(MCSchedModel::computeInstrLatency(*STI, SCDesc));
 }
 
 unsigned TargetSchedModel::computeInstrLatency(unsigned Opcode) const {
@@ -241,7 +264,9 @@ unsigned TargetSchedModel::computeInstrLatency(unsigned Opcode) const {
   unsigned SCIdx = TII->get(Opcode).getSchedClass();
   const MCSchedClassDesc *SCDesc = SchedModel.getSchedClassDesc(SCIdx);
 
-  if (SCDesc->isValid() && !SCDesc->isVariant())
+  if (!SCDesc->isValid())
+    return 0;
+  if (!SCDesc->isVariant())
     return computeInstrLatency(*SCDesc);
 
   llvm_unreachable("No MI sched latency");
@@ -279,7 +304,7 @@ computeOutputLatency(const MachineInstr *DefMI, unsigned DefOperIdx,
   // correctly append imp-use operands, and readsReg() strangely returns false
   // for predicated defs.
   unsigned Reg = DefMI->getOperand(DefOperIdx).getReg();
-  const MachineFunction &MF = *DefMI->getParent()->getParent();
+  const MachineFunction &MF = *DefMI->getMF();
   const TargetRegisterInfo *TRI = MF.getSubtarget().getRegisterInfo();
   if (!DepMI->readsRegister(Reg, TRI) && TII->isPredicated(*DepMI))
     return computeInstrLatency(DefMI);
@@ -297,4 +322,48 @@ computeOutputLatency(const MachineInstr *DefMI, unsigned DefOperIdx,
     }
   }
   return 0;
+}
+
+static Optional<double>
+getRThroughputFromItineraries(unsigned schedClass,
+                              const InstrItineraryData *IID){
+  Optional<double> Throughput;
+
+  for (const InstrStage *IS = IID->beginStage(schedClass),
+                        *E = IID->endStage(schedClass);
+       IS != E; ++IS) {
+    if (IS->getCycles()) {
+      double Temp = countPopulation(IS->getUnits()) * 1.0 / IS->getCycles();
+      Throughput = Throughput.hasValue()
+                        ? std::min(Throughput.getValue(), Temp)
+                        : Temp;
+    }
+  }
+  if (Throughput.hasValue())
+    // We need reciprocal throughput that's why we return such value.
+    return 1 / Throughput.getValue();
+  return Throughput;
+}
+
+Optional<double>
+TargetSchedModel::computeInstrRThroughput(const MachineInstr *MI) const {
+  if (hasInstrItineraries())
+    return getRThroughputFromItineraries(MI->getDesc().getSchedClass(),
+                                         getInstrItineraries());
+  if (hasInstrSchedModel())
+    return MCSchedModel::getReciprocalThroughput(*STI, *resolveSchedClass(MI));
+  return Optional<double>();
+}
+
+Optional<double>
+TargetSchedModel::computeInstrRThroughput(unsigned Opcode) const {
+  unsigned SchedClass = TII->get(Opcode).getSchedClass();
+  if (hasInstrItineraries())
+    return getRThroughputFromItineraries(SchedClass, getInstrItineraries());
+  if (hasInstrSchedModel()) {
+    const MCSchedClassDesc &SCDesc = *SchedModel.getSchedClassDesc(SchedClass);
+    if (SCDesc.isValid() && !SCDesc.isVariant())
+      return MCSchedModel::getReciprocalThroughput(*STI, SCDesc);
+  }
+  return Optional<double>();
 }

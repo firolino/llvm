@@ -20,7 +20,7 @@
 #include "llvm/ADT/SetVector.h"
 #include "llvm/Analysis/AliasAnalysis.h"
 #include "llvm/Analysis/AliasSetTracker.h"
-#include "llvm/Analysis/LoopPassManager.h"
+#include "llvm/Analysis/LoopAnalysisManager.h"
 #include "llvm/Analysis/ScalarEvolutionExpressions.h"
 #include "llvm/IR/DiagnosticInfo.h"
 #include "llvm/IR/ValueHandle.h"
@@ -37,39 +37,6 @@ class SCEV;
 class SCEVUnionPredicate;
 class LoopAccessInfo;
 class OptimizationRemarkEmitter;
-
-/// Optimization analysis message produced during vectorization. Messages inform
-/// the user why vectorization did not occur.
-class LoopAccessReport {
-  std::string Message;
-  const Instruction *Instr;
-
-protected:
-  LoopAccessReport(const Twine &Message, const Instruction *I)
-      : Message(Message.str()), Instr(I) {}
-
-public:
-  LoopAccessReport(const Instruction *I = nullptr) : Instr(I) {}
-
-  template <typename A> LoopAccessReport &operator<<(const A &Value) {
-    raw_string_ostream Out(Message);
-    Out << Value;
-    return *this;
-  }
-
-  const Instruction *getInstr() const { return Instr; }
-
-  std::string &str() { return Message; }
-  const std::string &str() const { return Message; }
-  operator Twine() { return Message; }
-
-  /// \brief Emit an analysis note for \p PassName with the debug location from
-  /// the instruction in \p Message if available.  Otherwise use the location of
-  /// \p TheLoop.
-  static void emitAnalysis(const LoopAccessReport &Message, const Loop *TheLoop,
-                           const char *PassName,
-                           OptimizationRemarkEmitter &ORE);
-};
 
 /// \brief Collection of parameters shared beetween the Loop Vectorizer and the
 /// Loop Access Analysis.
@@ -126,7 +93,7 @@ struct VectorizerParams {
 class MemoryDepChecker {
 public:
   typedef PointerIntPair<Value *, 1, bool> MemAccessInfo;
-  typedef SmallPtrSet<MemAccessInfo, 8> MemAccessInfoSet;
+  typedef SmallVector<MemAccessInfo, 8> MemAccessInfoList;
   /// \brief Set of potential dependent memory accesses.
   typedef EquivalenceClasses<MemAccessInfo> DepCandidates;
 
@@ -196,7 +163,7 @@ public:
   };
 
   MemoryDepChecker(PredicatedScalarEvolution &PSE, const Loop *L)
-      : PSE(PSE), InnermostLoop(L), AccessIdx(0),
+      : PSE(PSE), InnermostLoop(L), AccessIdx(0), MaxSafeRegisterWidth(-1U),
         ShouldRetryWithRuntimeCheck(false), SafeForVectorization(true),
         RecordDependences(true) {}
 
@@ -221,7 +188,7 @@ public:
   /// \brief Check whether the dependencies between the accesses are safe.
   ///
   /// Only checks sets with elements in \p CheckDeps.
-  bool areDepsSafe(DepCandidates &AccessSets, MemAccessInfoSet &CheckDeps,
+  bool areDepsSafe(DepCandidates &AccessSets, MemAccessInfoList &CheckDeps,
                    const ValueToValueMap &Strides);
 
   /// \brief No memory dependence was encountered that would inhibit
@@ -231,6 +198,10 @@ public:
   /// \brief The maximum number of bytes of a vector register we can vectorize
   /// the accesses safely with.
   uint64_t getMaxSafeDepDistBytes() { return MaxSafeDepDistBytes; }
+
+  /// \brief Return the number of elements that are safe to operate on
+  /// simultaneously, multiplied by the size of the element in bits.
+  uint64_t getMaxSafeRegisterWidth() const { return MaxSafeRegisterWidth; }
 
   /// \brief In same cases when the dependency check fails we can still
   /// vectorize the loop with a dynamic array access check.
@@ -287,6 +258,12 @@ private:
 
   // We can access this many bytes in parallel safely.
   uint64_t MaxSafeDepDistBytes;
+
+  /// \brief Number of elements (from consecutive iterations) that are safe to
+  /// operate on simultaneously, multiplied by the size of the element in bits.
+  /// The size of the element is taken from the memory access that is most
+  /// restrictive.
+  uint64_t MaxSafeRegisterWidth;
 
   /// \brief If we see a non-constant dependence distance we can still try to
   /// vectorize this loop with runtime checks.
@@ -690,6 +667,20 @@ int64_t getPtrStride(PredicatedScalarEvolution &PSE, Value *Ptr, const Loop *Lp,
                      const ValueToValueMap &StridesMap = ValueToValueMap(),
                      bool Assume = false, bool ShouldCheckWrap = true);
 
+/// \brief Attempt to sort the pointers in \p VL and return the sorted indices
+/// in \p SortedIndices, if reordering is required.
+///
+/// Returns 'true' if sorting is legal, otherwise returns 'false'.
+///
+/// For example, for a given \p VL of memory accesses in program order, a[i+4],
+/// a[i+0], a[i+1] and a[i+7], this function will sort the \p VL and save the
+/// sorted indices in \p SortedIndices as a[i+0], a[i+1], a[i+4], a[i+7] and
+/// saves the mask for actual memory accesses in program order in
+/// \p SortedIndices as <1,2,0,3>
+bool sortPtrAccesses(ArrayRef<Value *> VL, const DataLayout &DL,
+                     ScalarEvolution &SE,
+                     SmallVectorImpl<unsigned> &SortedIndices);
+
 /// \brief Returns true if the memory operations \p A and \p B are consecutive.
 /// This is a simple API that does not depend on the analysis pass. 
 bool isConsecutiveAccess(Value *A, Value *B, const DataLayout &DL,
@@ -749,22 +740,12 @@ private:
 class LoopAccessAnalysis
     : public AnalysisInfoMixin<LoopAccessAnalysis> {
   friend AnalysisInfoMixin<LoopAccessAnalysis>;
-  static char PassID;
+  static AnalysisKey Key;
 
 public:
   typedef LoopAccessInfo Result;
-  Result run(Loop &, LoopAnalysisManager &);
-  static StringRef name() { return "LoopAccessAnalysis"; }
-};
 
-/// \brief Printer pass for the \c LoopAccessInfo results.
-class LoopAccessInfoPrinterPass
-    : public PassInfoMixin<LoopAccessInfoPrinterPass> {
-  raw_ostream &OS;
-
-public:
-  explicit LoopAccessInfoPrinterPass(raw_ostream &OS) : OS(OS) {}
-  PreservedAnalyses run(Loop &L, LoopAnalysisManager &AM);
+  Result run(Loop &L, LoopAnalysisManager &AM, LoopStandardAnalysisResults &AR);
 };
 
 inline Instruction *MemoryDepChecker::Dependence::getSource(

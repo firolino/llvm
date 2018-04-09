@@ -16,10 +16,7 @@
 #ifndef LLVM_LIB_TARGET_AMDGPU_AMDGPUREGISTERINFO_H
 #define LLVM_LIB_TARGET_AMDGPU_AMDGPUREGISTERINFO_H
 
-#include "llvm/Target/TargetRegisterInfo.h"
-
 #define GET_REGINFO_HEADER
-#define GET_REGINFO_ENUM
 #include "AMDGPUGenRegisterInfo.inc"
 
 namespace llvm {
@@ -30,12 +27,13 @@ class TargetInstrInfo;
 struct AMDGPURegisterInfo : public AMDGPUGenRegisterInfo {
   AMDGPURegisterInfo();
 
+  bool enableMultipleCopyHints() const override { return true; }
+
   /// \returns the sub reg enum value for the given \p Channel
   /// (e.g. getSubRegFromChannel(0) -> AMDGPU::sub0)
   unsigned getSubRegFromChannel(unsigned Channel) const;
 
-  const MCPhysReg* getCalleeSavedRegs(const MachineFunction *MF) const override;
-  unsigned getFrameRegister(const MachineFunction &MF) const override;
+  void reserveRegisterTuples(BitVector &, unsigned Reg) const;
 };
 
 } // End namespace llvm

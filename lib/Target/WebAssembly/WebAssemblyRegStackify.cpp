@@ -20,15 +20,17 @@
 ///
 //===----------------------------------------------------------------------===//
 
-#include "WebAssembly.h"
 #include "MCTargetDesc/WebAssemblyMCTargetDesc.h" // for WebAssembly::ARGUMENT_*
+#include "WebAssembly.h"
 #include "WebAssemblyMachineFunctionInfo.h"
 #include "WebAssemblySubtarget.h"
+#include "WebAssemblyUtilities.h"
 #include "llvm/Analysis/AliasAnalysis.h"
-#include "llvm/CodeGen/LiveIntervalAnalysis.h"
+#include "llvm/CodeGen/LiveIntervals.h"
 #include "llvm/CodeGen/MachineBlockFrequencyInfo.h"
 #include "llvm/CodeGen/MachineDominators.h"
 #include "llvm/CodeGen/MachineInstrBuilder.h"
+#include "llvm/CodeGen/MachineModuleInfoImpls.h"
 #include "llvm/CodeGen/MachineRegisterInfo.h"
 #include "llvm/CodeGen/Passes.h"
 #include "llvm/Support/Debug.h"
@@ -65,6 +67,10 @@ public:
 } // end anonymous namespace
 
 char WebAssemblyRegStackify::ID = 0;
+INITIALIZE_PASS(WebAssemblyRegStackify, DEBUG_TYPE,
+                "Reorder instructions to use the WebAssembly value stack",
+                false, false)
+
 FunctionPass *llvm::createWebAssemblyRegStackify() {
   return new WebAssemblyRegStackify();
 }
@@ -84,6 +90,37 @@ static void ImposeStackOrdering(MachineInstr *MI) {
     MI->addOperand(MachineOperand::CreateReg(WebAssembly::VALUE_STACK,
                                              /*isDef=*/false,
                                              /*isImp=*/true));
+}
+
+// Convert an IMPLICIT_DEF instruction into an instruction which defines
+// a constant zero value.
+static void ConvertImplicitDefToConstZero(MachineInstr *MI,
+                                          MachineRegisterInfo &MRI,
+                                          const TargetInstrInfo *TII,
+                                          MachineFunction &MF) {
+  assert(MI->getOpcode() == TargetOpcode::IMPLICIT_DEF);
+
+  const auto *RegClass =
+      MRI.getRegClass(MI->getOperand(0).getReg());
+  if (RegClass == &WebAssembly::I32RegClass) {
+    MI->setDesc(TII->get(WebAssembly::CONST_I32));
+    MI->addOperand(MachineOperand::CreateImm(0));
+  } else if (RegClass == &WebAssembly::I64RegClass) {
+    MI->setDesc(TII->get(WebAssembly::CONST_I64));
+    MI->addOperand(MachineOperand::CreateImm(0));
+  } else if (RegClass == &WebAssembly::F32RegClass) {
+    MI->setDesc(TII->get(WebAssembly::CONST_F32));
+    ConstantFP *Val = cast<ConstantFP>(Constant::getNullValue(
+        Type::getFloatTy(MF.getFunction().getContext())));
+    MI->addOperand(MachineOperand::CreateFPImm(Val));
+  } else if (RegClass == &WebAssembly::F64RegClass) {
+    MI->setDesc(TII->get(WebAssembly::CONST_F64));
+    ConstantFP *Val = cast<ConstantFP>(Constant::getNullValue(
+        Type::getDoubleTy(MF.getFunction().getContext())));
+    MI->addOperand(MachineOperand::CreateFPImm(Val));
+  } else {
+    llvm_unreachable("Unexpected reg class");
+  }
 }
 
 // Determine whether a call to the callee referenced by
@@ -120,7 +157,7 @@ static void QueryCallee(const MachineInstr &MI, unsigned CalleeOpNo, bool &Read,
 }
 
 // Determine whether MI reads memory, writes memory, has side effects,
-// and/or uses the __stack_pointer value.
+// and/or uses the stack pointer value.
 static void Query(const MachineInstr &MI, AliasAnalysis &AA, bool &Read,
                   bool &Write, bool &Effects, bool &StackPointer) {
   assert(!MI.isPosition());
@@ -144,8 +181,9 @@ static void Query(const MachineInstr &MI, AliasAnalysis &AA, bool &Read,
         auto PSV = MPI.V.get<const PseudoSourceValue *>();
         if (const ExternalSymbolPseudoSourceValue *EPSV =
                 dyn_cast<ExternalSymbolPseudoSourceValue>(PSV))
-          if (StringRef(EPSV->getSymbol()) == "__stack_pointer")
+          if (StringRef(EPSV->getSymbol()) == "__stack_pointer") {
             StackPointer = true;
+          }
       }
     }
   } else if (MI.hasOrderedMemoryRef()) {
@@ -404,18 +442,18 @@ static bool OneUseDominatesOtherUses(unsigned Reg, const MachineOperand &OneUse,
   return true;
 }
 
-/// Get the appropriate tee_local opcode for the given register class.
-static unsigned GetTeeLocalOpcode(const TargetRegisterClass *RC) {
+/// Get the appropriate tee opcode for the given register class.
+static unsigned GetTeeOpcode(const TargetRegisterClass *RC) {
   if (RC == &WebAssembly::I32RegClass)
-    return WebAssembly::TEE_LOCAL_I32;
+    return WebAssembly::TEE_I32;
   if (RC == &WebAssembly::I64RegClass)
-    return WebAssembly::TEE_LOCAL_I64;
+    return WebAssembly::TEE_I64;
   if (RC == &WebAssembly::F32RegClass)
-    return WebAssembly::TEE_LOCAL_F32;
+    return WebAssembly::TEE_F32;
   if (RC == &WebAssembly::F64RegClass)
-    return WebAssembly::TEE_LOCAL_F64;
+    return WebAssembly::TEE_F64;
   if (RC == &WebAssembly::V128RegClass)
-    return WebAssembly::TEE_LOCAL_V128;
+    return WebAssembly::TEE_V128;
   llvm_unreachable("Unexpected register class");
 }
 
@@ -513,8 +551,8 @@ static MachineInstr *RematerializeCheapDef(
 
 /// A multiple-use def in the same block with no intervening memory or register
 /// dependencies; move the def down, nest it with the current instruction, and
-/// insert a tee_local to satisfy the rest of the uses. As an illustration,
-/// rewrite this:
+/// insert a tee to satisfy the rest of the uses. As an illustration, rewrite
+/// this:
 ///
 ///    Reg = INST ...        // Def
 ///    INST ..., Reg, ...    // Insert
@@ -524,7 +562,7 @@ static MachineInstr *RematerializeCheapDef(
 /// to this:
 ///
 ///    DefReg = INST ...     // Def (to become the new Insert)
-///    TeeReg, Reg = TEE_LOCAL_... DefReg
+///    TeeReg, Reg = TEE_... DefReg
 ///    INST ..., TeeReg, ... // Insert
 ///    INST ..., Reg, ...
 ///    INST ..., Reg, ...
@@ -547,7 +585,7 @@ static MachineInstr *MoveAndTeeForMultiUse(
   unsigned DefReg = MRI.createVirtualRegister(RegClass);
   MachineOperand &DefMO = Def->getOperand(0);
   MachineInstr *Tee = BuildMI(MBB, Insert, Insert->getDebugLoc(),
-                              TII->get(GetTeeLocalOpcode(RegClass)), TeeReg)
+                              TII->get(GetTeeOpcode(RegClass)), TeeReg)
                           .addReg(Reg, RegState::Define)
                           .addReg(DefReg, getUndefRegState(DefMO.isDead()));
   Op.setReg(TeeReg);
@@ -712,6 +750,14 @@ bool WebAssemblyRegStackify::runOnMachineFunction(MachineFunction &MF) {
   MachineDominatorTree &MDT = getAnalysis<MachineDominatorTree>();
   LiveIntervals &LIS = getAnalysis<LiveIntervals>();
 
+  // Disable the TEE optimization if we aren't doing direct wasm object
+  // emission, because lowering TEE to TEE_LOCAL is done in the ExplicitLocals
+  // pass, which is also disabled.
+  bool UseTee = true;
+  if (MF.getSubtarget<WebAssemblySubtarget>()
+        .getTargetTriple().isOSBinFormatELF())
+    UseTee = false;
+
   // Walk the instructions from the bottom up. Currently we don't look past
   // block boundaries, and the blocks aren't ordered so the block visitation
   // order isn't significant, but we may want to change this in the future.
@@ -759,18 +805,11 @@ bool WebAssemblyRegStackify::runOnMachineFunction(MachineFunction &MF) {
 
         // Argument instructions represent live-in registers and not real
         // instructions.
-        if (Def->getOpcode() == WebAssembly::ARGUMENT_I32 ||
-            Def->getOpcode() == WebAssembly::ARGUMENT_I64 ||
-            Def->getOpcode() == WebAssembly::ARGUMENT_F32 ||
-            Def->getOpcode() == WebAssembly::ARGUMENT_F64 ||
-            Def->getOpcode() == WebAssembly::ARGUMENT_v16i8 ||
-            Def->getOpcode() == WebAssembly::ARGUMENT_v8i16 ||
-            Def->getOpcode() == WebAssembly::ARGUMENT_v4i32 ||
-            Def->getOpcode() == WebAssembly::ARGUMENT_v4f32)
+        if (WebAssembly::isArgument(*Def))
           continue;
 
         // Decide which strategy to take. Prefer to move a single-use value
-        // over cloning it, and prefer cloning over introducing a tee_local.
+        // over cloning it, and prefer cloning over introducing a tee.
         // For moving, we require the def to be in the same block as the use;
         // this makes things simpler (LiveIntervals' handleMove function only
         // supports intra-block moves) and it's MachineSink's job to catch all
@@ -784,7 +823,7 @@ bool WebAssemblyRegStackify::runOnMachineFunction(MachineFunction &MF) {
           Insert =
               RematerializeCheapDef(Reg, Op, *Def, MBB, Insert->getIterator(),
                                     LIS, MFI, MRI, TII, TRI);
-        } else if (CanMove &&
+        } else if (UseTee && CanMove &&
                    OneUseDominatesOtherUses(Reg, Op, MBB, MRI, MDT, LIS, MFI)) {
           Insert = MoveAndTeeForMultiUse(Reg, Op, Def, MBB, Insert, LIS, MFI,
                                          MRI, TII);
@@ -796,6 +835,12 @@ bool WebAssemblyRegStackify::runOnMachineFunction(MachineFunction &MF) {
           // Proceed to the next operand.
           continue;
         }
+
+        // If the instruction we just stackified is an IMPLICIT_DEF, convert it
+        // to a constant 0 so that the def is explicit, and the push/pop
+        // correspondence is maintained.
+        if (Insert->getOpcode() == TargetOpcode::IMPLICIT_DEF)
+          ConvertImplicitDefToConstZero(Insert, MRI, TII, MF);
 
         // We stackified an operand. Add the defining instruction's operands to
         // the worklist stack now to continue to build an ever deeper tree.

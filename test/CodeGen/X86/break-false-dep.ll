@@ -67,7 +67,7 @@ declare double @llvm.sqrt.f64(double)
 ; SSE: for.body{{$}}
 ;
 ; This loop contains two cvtsi2ss instructions that update the same xmm
-; register.  Verify that the execution dependency fix pass breaks those
+; register.  Verify that the break false dependency fix pass breaks those
 ; dependencies by inserting xorps instructions.
 ;
 ; If the register allocator chooses different registers for the two cvtsi2ss
@@ -141,7 +141,7 @@ ret:
 ; This loop contains a cvtsi2sd instruction that has a loop-carried
 ; false dependency on an xmm that is modified by other scalar instructions
 ; that follow it in the loop. Additionally, the source of convert is a
-; memory operand. Verify the execution dependency fix pass breaks this
+; memory operand. Verify the break false dependency fix pass breaks this
 ; dependency by inserting a xor before the convert.
 @x = common global [1024 x double] zeroinitializer, align 16
 @y = common global [1024 x double] zeroinitializer, align 16
@@ -276,4 +276,61 @@ ret:
 ;AVX-NOT: {{%xmm[4-7]}}
 ;AVX: vcvtsi2sdq {{.*}}, [[XMM4_7:%xmm[4-7]]], {{%xmm[0-9]+}}
 ;AVX-NOT: [[XMM4_7]]
+}
+
+; Make sure we are making a smart choice regarding undef registers even for more
+; complicated loop structures. This example is the inner loop from
+; julia> a = falses(10000); a[1:4:end] = true
+; julia> linspace(1.0,2.0,10000)[a]
+define void @loopclearance2(double* nocapture %y, i64* %x, double %c1, double %c2, double %c3, double %c4, i64 %size) {
+entry:
+  tail call void asm sideeffect "", "~{xmm7},~{dirflag},~{fpsr},~{flags}"()
+  tail call void asm sideeffect "", "~{xmm8},~{xmm9},~{xmm10},~{xmm11},~{dirflag},~{fpsr},~{flags}"()
+  tail call void asm sideeffect "", "~{xmm12},~{xmm13},~{xmm14},~{xmm15},~{dirflag},~{fpsr},~{flags}"()
+  br label %loop
+
+loop:
+  %phi_i = phi i64 [ 1, %entry ], [ %nexti, %loop_end ]
+  %phi_j = phi i64 [ 1, %entry ], [ %nextj, %loop_end ]
+  %phi_k = phi i64 [ 0, %entry ], [ %nextk, %loop_end ]
+  br label %inner_loop
+
+inner_loop:
+  %phi = phi i64 [ %phi_k, %loop ], [ %nextk, %inner_loop ]
+  %idx = lshr i64 %phi, 6
+  %inputptr = getelementptr i64, i64* %x, i64 %idx
+  %input = load i64, i64* %inputptr, align 8
+  %masked = and i64 %phi, 63
+  %shiftedmasked = shl i64 1, %masked
+  %maskedinput = and i64 %input, %shiftedmasked
+  %cmp = icmp eq i64 %maskedinput, 0
+  %nextk = add i64 %phi, 1
+  br i1 %cmp, label %inner_loop, label %loop_end
+
+loop_end:
+  %nexti = add i64 %phi_i, 1
+  %nextj = add i64 %phi_j, 1
+  ; Register use, plus us clobbering 7-15 above, basically forces xmm6 here as
+  ; the only reasonable choice. The primary thing we care about is that it's
+  ; not one of the registers used in the loop (e.g. not the output reg here)
+;AVX-NOT: %xmm6
+;AVX: vcvtsi2sdq {{.*}}, %xmm6, {{%xmm[0-9]+}}
+;AVX-NOT: %xmm6
+  %nexti_f = sitofp i64 %nexti to double
+  %sub = fsub double %c1, %nexti_f
+  %mul = fmul double %sub, %c2
+;AVX: vcvtsi2sdq {{.*}}, %xmm6, {{%xmm[0-9]+}}
+;AVX-NOT: %xmm6
+  %phi_f = sitofp i64 %phi to double
+  %mul2 = fmul double %phi_f, %c3
+  %add2 = fadd double %mul, %mul2
+  %div = fdiv double %add2, %c4
+  %prev_j = add i64 %phi_j, -1
+  %outptr = getelementptr double, double* %y, i64 %prev_j
+  store double %div, double* %outptr, align 8
+  %done = icmp slt i64 %size, %nexti
+  br i1 %done, label %loopdone, label %loop
+
+loopdone:
+  ret void
 }

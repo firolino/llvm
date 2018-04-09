@@ -19,24 +19,22 @@
 #include "llvm/Object/Error.h"
 #include "llvm/Object/MachOUniversal.h"
 #include "llvm/Object/ObjectFile.h"
+#include "llvm/Support/Chrono.h"
 #include "llvm/Support/Errc.h"
 #include "llvm/Support/ErrorOr.h"
-#include "llvm/Support/TimeValue.h"
 
 namespace llvm {
 namespace dsymutil {
 
-/// \brief The BinaryHolder class is responsible for creating and
-/// owning ObjectFile objects and their underlying MemoryBuffer. This
-/// is different from a simple OwningBinary in that it handles
-/// accessing to archive members.
+/// The BinaryHolder class is responsible for creating and owning ObjectFile
+/// objects and their underlying MemoryBuffer. This is different from a simple
+/// OwningBinary in that it handles accessing to archive members.
 ///
-/// As an optimization, this class will reuse an already mapped and
-/// parsed Archive object if 2 successive requests target the same
-/// archive file (Which is always the case in debug maps).
-/// Currently it only owns one memory buffer at any given time,
-/// meaning that a mapping request will invalidate the previous memory
-/// mapping.
+/// As an optimization, this class will reuse an already mapped and parsed
+/// Archive object if 2 successive requests target the same archive file (Which
+/// is always the case in debug maps).
+/// Currently it only owns one memory buffer at any given time, meaning that a
+/// mapping request will invalidate the previous memory mapping.
 class BinaryHolder {
   std::vector<std::unique_ptr<object::Archive>> CurrentArchives;
   std::unique_ptr<MemoryBuffer> CurrentMemoryBuffer;
@@ -54,7 +52,8 @@ class BinaryHolder {
   /// potential match for the given \p Filename in the currently
   /// mapped archive if there is one.
   ErrorOr<std::vector<MemoryBufferRef>>
-  GetArchiveMemberBuffers(StringRef Filename, sys::TimeValue Timestamp);
+  GetArchiveMemberBuffers(StringRef Filename,
+                          sys::TimePoint<std::chrono::seconds> Timestamp);
 
   /// Interpret Filename as an archive member specification map the
   /// corresponding archive to memory and return the MemoryBufferRefs
@@ -62,7 +61,8 @@ class BinaryHolder {
   /// returned when there are multiple architectures available for the
   /// requested file.
   ErrorOr<std::vector<MemoryBufferRef>>
-  MapArchiveAndGetMemberBuffers(StringRef Filename, sys::TimeValue Timestamp);
+  MapArchiveAndGetMemberBuffers(StringRef Filename,
+                                sys::TimePoint<std::chrono::seconds> Timestamp);
 
   /// Return the MemoryBufferRef that holds the memory mapping for the
   /// given \p Filename. This function will try to parse archive
@@ -74,7 +74,8 @@ class BinaryHolder {
   /// Multiple buffers are returned when there are multiple
   /// architectures available for the requested file.
   ErrorOr<std::vector<MemoryBufferRef>>
-  GetMemoryBuffersForFile(StringRef Filename, sys::TimeValue Timestamp);
+  GetMemoryBuffersForFile(StringRef Filename,
+                          sys::TimePoint<std::chrono::seconds> Timestamp);
 
   void changeBackingMemoryBuffer(std::unique_ptr<MemoryBuffer> &&MemBuf);
   ErrorOr<const object::ObjectFile &> getObjfileForArch(const Triple &T);
@@ -91,13 +92,15 @@ public:
   /// multiple architectures available for the requested file.
   ErrorOr<std::vector<const object::ObjectFile *>>
   GetObjectFiles(StringRef Filename,
-                 sys::TimeValue Timestamp = sys::TimeValue::PosixZeroTime());
+                 sys::TimePoint<std::chrono::seconds> Timestamp =
+                     sys::TimePoint<std::chrono::seconds>());
 
   /// Wraps GetObjectFiles() to return a derived ObjectFile type.
   template <typename ObjectFileType>
   ErrorOr<std::vector<const ObjectFileType *>>
   GetFilesAs(StringRef Filename,
-             sys::TimeValue Timestamp = sys::TimeValue::PosixZeroTime()) {
+             sys::TimePoint<std::chrono::seconds> Timestamp =
+                 sys::TimePoint<std::chrono::seconds>()) {
     auto ErrOrObjFile = GetObjectFiles(Filename, Timestamp);
     if (auto Err = ErrOrObjFile.getError())
       return Err;
@@ -114,7 +117,7 @@ public:
   }
 
   /// Access the currently owned ObjectFile with architecture \p T. As
-  /// successfull call to GetObjectFiles() or GetFilesAs() must have
+  /// successful call to GetObjectFiles() or GetFilesAs() must have
   /// been performed before calling this.
   ErrorOr<const object::ObjectFile &> Get(const Triple &T) {
     return getObjfileForArch(T);
@@ -130,6 +133,6 @@ public:
     return cast<ObjectFileType>(*ErrOrObj);
   }
 };
-}
-}
+} // namespace dsymutil
+} // namespace llvm
 #endif

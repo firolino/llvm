@@ -10,48 +10,16 @@
 #include "llvm/DebugInfo/CodeView/CVTypeVisitor.h"
 
 #include "llvm/DebugInfo/CodeView/CodeViewError.h"
-#include "llvm/DebugInfo/MSF/ByteStream.h"
+#include "llvm/DebugInfo/CodeView/TypeCollection.h"
+#include "llvm/DebugInfo/CodeView/TypeDeserializer.h"
+#include "llvm/DebugInfo/CodeView/TypeRecordMapping.h"
+#include "llvm/DebugInfo/CodeView/TypeVisitorCallbackPipeline.h"
+#include "llvm/Support/BinaryByteStream.h"
+#include "llvm/Support/BinaryStreamReader.h"
 
 using namespace llvm;
 using namespace llvm::codeview;
 
-static Error skipPadding(msf::StreamReader &Reader) {
-  if (Reader.empty())
-    return Error::success();
-
-  uint8_t Leaf = Reader.peek();
-  if (Leaf < LF_PAD0)
-    return Error::success();
-  // Leaf is greater than 0xf0. We should advance by the number of bytes in
-  // the low 4 bits.
-  unsigned BytesToAdvance = Leaf & 0x0F;
-  return Reader.skip(BytesToAdvance);
-}
-
-template <typename T>
-static Expected<CVMemberRecord>
-deserializeMemberRecord(msf::StreamReader &Reader, TypeLeafKind Kind) {
-  msf::StreamReader OldReader = Reader;
-  TypeRecordKind RK = static_cast<TypeRecordKind>(Kind);
-  auto ExpectedRecord = T::deserialize(RK, Reader);
-  if (!ExpectedRecord)
-    return ExpectedRecord.takeError();
-  assert(Reader.bytesRemaining() < OldReader.bytesRemaining());
-  if (auto EC = skipPadding(Reader))
-    return std::move(EC);
-
-  CVMemberRecord CVMR;
-  CVMR.Kind = Kind;
-
-  uint32_t RecordLength = OldReader.bytesRemaining() - Reader.bytesRemaining();
-  if (auto EC = OldReader.readBytes(CVMR.Data, RecordLength))
-    return std::move(EC);
-
-  return CVMR;
-}
-
-CVTypeVisitor::CVTypeVisitor(TypeVisitorCallbacks &Callbacks)
-    : Callbacks(Callbacks) {}
 
 template <typename T>
 static Error visitKnownRecord(CVType &Record, TypeVisitorCallbacks &Callbacks) {
@@ -72,35 +40,8 @@ static Error visitKnownMember(CVMemberRecord &Record,
   return Error::success();
 }
 
-Error CVTypeVisitor::visitTypeRecord(CVType &Record) {
-  if (auto EC = Callbacks.visitTypeBegin(Record))
-    return EC;
-
-  switch (Record.Type) {
-  default:
-    if (auto EC = Callbacks.visitUnknownType(Record))
-      return EC;
-    break;
-#define TYPE_RECORD(EnumName, EnumVal, Name)                                   \
-  case EnumName: {                                                             \
-    if (auto EC = visitKnownRecord<Name##Record>(Record, Callbacks))           \
-      return EC;                                                               \
-    break;                                                                     \
-  }
-#define TYPE_RECORD_ALIAS(EnumName, EnumVal, Name, AliasName)                  \
-  TYPE_RECORD(EnumVal, EnumVal, AliasName)
-#define MEMBER_RECORD(EnumName, EnumVal, Name)
-#define MEMBER_RECORD_ALIAS(EnumName, EnumVal, Name, AliasName)
-#include "llvm/DebugInfo/CodeView/TypeRecords.def"
-  }
-
-  if (auto EC = Callbacks.visitTypeEnd(Record))
-    return EC;
-
-  return Error::success();
-}
-
-Error CVTypeVisitor::visitMemberRecord(CVMemberRecord &Record) {
+static Error visitMemberRecord(CVMemberRecord &Record,
+                               TypeVisitorCallbacks &Callbacks) {
   if (auto EC = Callbacks.visitMemberBegin(Record))
     return EC;
 
@@ -119,13 +60,83 @@ Error CVTypeVisitor::visitMemberRecord(CVMemberRecord &Record) {
   MEMBER_RECORD(EnumVal, EnumVal, AliasName)
 #define TYPE_RECORD(EnumName, EnumVal, Name)
 #define TYPE_RECORD_ALIAS(EnumName, EnumVal, Name, AliasName)
-#include "llvm/DebugInfo/CodeView/TypeRecords.def"
+#include "llvm/DebugInfo/CodeView/CodeViewTypes.def"
   }
 
   if (auto EC = Callbacks.visitMemberEnd(Record))
     return EC;
 
   return Error::success();
+}
+
+namespace {
+
+class CVTypeVisitor {
+public:
+  explicit CVTypeVisitor(TypeVisitorCallbacks &Callbacks);
+
+  Error visitTypeRecord(CVType &Record, TypeIndex Index);
+  Error visitTypeRecord(CVType &Record);
+
+  /// Visits the type records in Data. Sets the error flag on parse failures.
+  Error visitTypeStream(const CVTypeArray &Types);
+  Error visitTypeStream(CVTypeRange Types);
+  Error visitTypeStream(TypeCollection &Types);
+
+  Error visitMemberRecord(CVMemberRecord Record);
+  Error visitFieldListMemberStream(BinaryStreamReader &Stream);
+
+private:
+  Error finishVisitation(CVType &Record);
+
+  /// The interface to the class that gets notified of each visitation.
+  TypeVisitorCallbacks &Callbacks;
+};
+
+CVTypeVisitor::CVTypeVisitor(TypeVisitorCallbacks &Callbacks)
+    : Callbacks(Callbacks) {}
+
+Error CVTypeVisitor::finishVisitation(CVType &Record) {
+  switch (Record.Type) {
+  default:
+    if (auto EC = Callbacks.visitUnknownType(Record))
+      return EC;
+    break;
+#define TYPE_RECORD(EnumName, EnumVal, Name)                                   \
+  case EnumName: {                                                             \
+    if (auto EC = visitKnownRecord<Name##Record>(Record, Callbacks))           \
+      return EC;                                                               \
+    break;                                                                     \
+  }
+#define TYPE_RECORD_ALIAS(EnumName, EnumVal, Name, AliasName)                  \
+  TYPE_RECORD(EnumVal, EnumVal, AliasName)
+#define MEMBER_RECORD(EnumName, EnumVal, Name)
+#define MEMBER_RECORD_ALIAS(EnumName, EnumVal, Name, AliasName)
+#include "llvm/DebugInfo/CodeView/CodeViewTypes.def"
+  }
+
+  if (auto EC = Callbacks.visitTypeEnd(Record))
+    return EC;
+
+  return Error::success();
+}
+
+Error CVTypeVisitor::visitTypeRecord(CVType &Record, TypeIndex Index) {
+  if (auto EC = Callbacks.visitTypeBegin(Record, Index))
+    return EC;
+
+  return finishVisitation(Record);
+}
+
+Error CVTypeVisitor::visitTypeRecord(CVType &Record) {
+  if (auto EC = Callbacks.visitTypeBegin(Record))
+    return EC;
+
+  return finishVisitation(Record);
+}
+
+Error CVTypeVisitor::visitMemberRecord(CVMemberRecord Record) {
+  return ::visitMemberRecord(Record, Callbacks);
 }
 
 /// Visits the type records in Data. Sets the error flag on parse failures.
@@ -137,51 +148,128 @@ Error CVTypeVisitor::visitTypeStream(const CVTypeArray &Types) {
   return Error::success();
 }
 
-template <typename MR>
-static Error visitKnownMember(msf::StreamReader &Reader, TypeLeafKind Leaf,
-                              TypeVisitorCallbacks &Callbacks) {
-  auto ExpectedRecord = deserializeMemberRecord<MR>(Reader, Leaf);
-  if (!ExpectedRecord)
-    return ExpectedRecord.takeError();
-  CVMemberRecord &Record = *ExpectedRecord;
-  if (auto EC = Callbacks.visitMemberBegin(Record))
-    return EC;
-  if (auto EC = visitKnownMember<MR>(Record, Callbacks))
-    return EC;
-  if (auto EC = Callbacks.visitMemberEnd(Record))
-    return EC;
+Error CVTypeVisitor::visitTypeStream(CVTypeRange Types) {
+  for (auto I : Types) {
+    if (auto EC = visitTypeRecord(I))
+      return EC;
+  }
   return Error::success();
 }
 
-Error CVTypeVisitor::visitFieldListMemberStream(msf::StreamReader Reader) {
+Error CVTypeVisitor::visitTypeStream(TypeCollection &Types) {
+  Optional<TypeIndex> I = Types.getFirst();
+  while (I) {
+    CVType Type = Types.getType(*I);
+    if (auto EC = visitTypeRecord(Type, *I))
+      return EC;
+    I = Types.getNext(*I);
+  }
+  return Error::success();
+}
+
+Error CVTypeVisitor::visitFieldListMemberStream(BinaryStreamReader &Reader) {
   TypeLeafKind Leaf;
   while (!Reader.empty()) {
     if (auto EC = Reader.readEnum(Leaf))
       return EC;
 
-    CVType Record;
-    switch (Leaf) {
-    default:
-      // Field list records do not describe their own length, so we cannot
-      // continue parsing past a type that we don't know how to deserialize.
-      return llvm::make_error<CodeViewError>(
-          cv_error_code::unknown_member_record);
-#define MEMBER_RECORD(EnumName, EnumVal, Name)                                 \
-  case EnumName: {                                                             \
-    if (auto EC = visitKnownMember<Name##Record>(Reader, Leaf, Callbacks))     \
-      return EC;                                                               \
-    break;                                                                     \
+    CVMemberRecord Record;
+    Record.Kind = Leaf;
+    if (auto EC = ::visitMemberRecord(Record, Callbacks))
+      return EC;
   }
-#define MEMBER_RECORD_ALIAS(EnumName, EnumVal, Name, AliasName)                \
-  MEMBER_RECORD(EnumVal, EnumVal, AliasName)
-#include "llvm/DebugInfo/CodeView/TypeRecords.def"
-    }
-  }
+
   return Error::success();
 }
 
-Error CVTypeVisitor::visitFieldListMemberStream(ArrayRef<uint8_t> Data) {
-  msf::ByteStream S(Data);
-  msf::StreamReader SR(S);
-  return visitFieldListMemberStream(SR);
+struct FieldListVisitHelper {
+  FieldListVisitHelper(TypeVisitorCallbacks &Callbacks, ArrayRef<uint8_t> Data,
+                       VisitorDataSource Source)
+      : Stream(Data, llvm::support::little), Reader(Stream),
+        Deserializer(Reader),
+        Visitor((Source == VDS_BytesPresent) ? Pipeline : Callbacks) {
+    if (Source == VDS_BytesPresent) {
+      Pipeline.addCallbackToPipeline(Deserializer);
+      Pipeline.addCallbackToPipeline(Callbacks);
+    }
+  }
+
+  BinaryByteStream Stream;
+  BinaryStreamReader Reader;
+  FieldListDeserializer Deserializer;
+  TypeVisitorCallbackPipeline Pipeline;
+  CVTypeVisitor Visitor;
+};
+
+struct VisitHelper {
+  VisitHelper(TypeVisitorCallbacks &Callbacks, VisitorDataSource Source)
+      : Visitor((Source == VDS_BytesPresent) ? Pipeline : Callbacks) {
+    if (Source == VDS_BytesPresent) {
+      Pipeline.addCallbackToPipeline(Deserializer);
+      Pipeline.addCallbackToPipeline(Callbacks);
+    }
+  }
+
+  TypeDeserializer Deserializer;
+  TypeVisitorCallbackPipeline Pipeline;
+  CVTypeVisitor Visitor;
+};
+}
+
+Error llvm::codeview::visitTypeRecord(CVType &Record, TypeIndex Index,
+                                      TypeVisitorCallbacks &Callbacks,
+                                      VisitorDataSource Source) {
+  VisitHelper V(Callbacks, Source);
+  return V.Visitor.visitTypeRecord(Record, Index);
+}
+
+Error llvm::codeview::visitTypeRecord(CVType &Record,
+                                      TypeVisitorCallbacks &Callbacks,
+                                      VisitorDataSource Source) {
+  VisitHelper V(Callbacks, Source);
+  return V.Visitor.visitTypeRecord(Record);
+}
+
+Error llvm::codeview::visitTypeStream(const CVTypeArray &Types,
+                                      TypeVisitorCallbacks &Callbacks,
+                                      VisitorDataSource Source) {
+  VisitHelper V(Callbacks, Source);
+  return V.Visitor.visitTypeStream(Types);
+}
+
+Error llvm::codeview::visitTypeStream(CVTypeRange Types,
+                                      TypeVisitorCallbacks &Callbacks) {
+  VisitHelper V(Callbacks, VDS_BytesPresent);
+  return V.Visitor.visitTypeStream(Types);
+}
+
+Error llvm::codeview::visitTypeStream(TypeCollection &Types,
+                                      TypeVisitorCallbacks &Callbacks) {
+  // When the internal visitor calls Types.getType(Index) the interface is
+  // required to return a CVType with the bytes filled out.  So we can assume
+  // that the bytes will be present when individual records are visited.
+  VisitHelper V(Callbacks, VDS_BytesPresent);
+  return V.Visitor.visitTypeStream(Types);
+}
+
+Error llvm::codeview::visitMemberRecord(CVMemberRecord Record,
+                                        TypeVisitorCallbacks &Callbacks,
+                                        VisitorDataSource Source) {
+  FieldListVisitHelper V(Callbacks, Record.Data, Source);
+  return V.Visitor.visitMemberRecord(Record);
+}
+
+Error llvm::codeview::visitMemberRecord(TypeLeafKind Kind,
+                                        ArrayRef<uint8_t> Record,
+                                        TypeVisitorCallbacks &Callbacks) {
+  CVMemberRecord R;
+  R.Data = Record;
+  R.Kind = Kind;
+  return visitMemberRecord(R, Callbacks, VDS_BytesPresent);
+}
+
+Error llvm::codeview::visitMemberRecordStream(ArrayRef<uint8_t> FieldList,
+                                              TypeVisitorCallbacks &Callbacks) {
+  FieldListVisitHelper V(Callbacks, FieldList, VDS_BytesPresent);
+  return V.Visitor.visitFieldListMemberStream(V.Reader);
 }

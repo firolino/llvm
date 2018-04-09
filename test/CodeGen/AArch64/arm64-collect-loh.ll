@@ -1,5 +1,5 @@
-; RUN: llc -mtriple=arm64-apple-ios -O2 -aarch64-enable-collect-loh -aarch64-collect-loh-bb-only=false < %s -o - | FileCheck %s
-; RUN: llc -mtriple=arm64-linux-gnu -O2 -aarch64-enable-collect-loh -aarch64-collect-loh-bb-only=false < %s -o - | FileCheck %s --check-prefix=CHECK-ELF
+; RUN: llc -o - %s -mtriple=arm64-apple-ios -O2 | FileCheck %s
+; RUN: llc -o - %s -mtriple=arm64-linux-gnu -O2 | FileCheck %s --check-prefix=CHECK-ELF
 
 ; CHECK-ELF-NOT: .loh
 ; CHECK-ELF-NOT: AdrpAdrp
@@ -633,15 +633,18 @@ define void @setL(<1 x i8> %t) {
 ; a tuple register to appear in the lowering. Thus, the target
 ; cpu is required to have the problem reproduced.
 ; CHECK-LABEL: _uninterestingSub
+; CHECK: [[LOH_LABEL0:Lloh[0-9]+]]:
 ; CHECK: adrp [[ADRP_REG:x[0-9]+]], [[CONSTPOOL:lCPI[0-9]+_[0-9]+]]@PAGE
-; CHECK-NEXT: ldr q[[IDX:[0-9]+]], {{\[}}[[ADRP_REG]], [[CONSTPOOL]]@PAGEOFF]
+; CHECK: [[LOH_LABEL1:Lloh[0-9]+]]:
+; CHECK: ldr q[[IDX:[0-9]+]], {{\[}}[[ADRP_REG]], [[CONSTPOOL]]@PAGEOFF]
 ; The tuple comes from the next instruction.
-; CHECK-NEXT: tbl.16b v{{[0-9]+}}, { v{{[0-9]+}}, v{{[0-9]+}} }, v[[IDX]]
+; CHECK: ext.16b v{{[0-9]+}}, v{{[0-9]+}}, v{{[0-9]+}}, #1
 ; CHECK: ret
+; CHECK: .loh AdrpLdr [[LOH_LABEL0]], [[LOH_LABEL1]]
 define void @uninterestingSub(i8* nocapture %row) #0 {
   %tmp = bitcast i8* %row to <16 x i8>*
   %tmp1 = load <16 x i8>, <16 x i8>* %tmp, align 16
-  %vext43 = shufflevector <16 x i8> <i8 undef, i8 0, i8 0, i8 0, i8 0, i8 0, i8 0, i8 0, i8 0, i8 0, i8 0, i8 0, i8 0, i8 0, i8 0, i8 0>, <16 x i8> %tmp1, <16 x i32> <i32 1, i32 2, i32 3, i32 4, i32 5, i32 6, i32 7, i32 8, i32 9, i32 10, i32 11, i32 12, i32 13, i32 14, i32 15, i32 16>
+  %vext43 = shufflevector <16 x i8> <i8 undef, i8 16, i8 15, i8 14, i8 13, i8 12, i8 11, i8 10, i8 9, i8 8, i8 7, i8 6, i8 5, i8 4, i8 3, i8 2>, <16 x i8> %tmp1, <16 x i32> <i32 1, i32 2, i32 3, i32 4, i32 5, i32 6, i32 7, i32 8, i32 9, i32 10, i32 11, i32 12, i32 13, i32 14, i32 15, i32 16>
   %add.i.414 = add <16 x i8> zeroinitializer, %vext43
   store <16 x i8> %add.i.414, <16 x i8>* %tmp, align 16
   %add.ptr51 = getelementptr inbounds i8, i8* %row, i64 16
@@ -664,10 +667,10 @@ entry:
 if.then.i:
   ret void
 if.end.i:
-; CHECK: .loh AdrpAdrp Lloh91, Lloh93
-; CHECK: .loh AdrpLdr Lloh91, Lloh92
-; CHECK: .loh AdrpLdrGot Lloh93, Lloh95
-; CHECK: .loh AdrpLdrGot Lloh94, Lloh96
+; CHECK: .loh AdrpLdrGot
+; CHECK: .loh AdrpLdrGot
+; CHECK: .loh AdrpAdrp
+; CHECK: .loh AdrpLdr
   %mul.i.i.i = fmul double undef, 1.000000e-06
   %add.i.i.i = fadd double undef, %mul.i.i.i
   %sub.i.i = fsub double %add.i.i.i, undef

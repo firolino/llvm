@@ -13,20 +13,13 @@ entry:
 attributes #0 = { nounwind sspstrong "correctly-rounded-divide-sqrt-fp-math"="false" "disable-tail-calls"="false" "less-precise-fpmad"="false" "no-frame-pointer-elim"="true" "no-frame-pointer-elim-non-leaf" "no-infs-fp-math"="false" "no-jump-tables"="false" "no-nans-fp-math"="false" "no-signed-zeros-fp-math"="false" "no-trapping-math"="false" "stack-protector-buffer-size"="8" "target-cpu"="pentium4" "target-features"="+fxsr,+mmx,+sse,+sse2,+x87" "unsafe-fp-math"="false" "use-soft-float"="false" }
 
 !llvm.dbg.cu = !{!0}
-!llvm.module.flags = !{!3, !7, !8}
+!llvm.module.flags = !{!7, !8}
 !llvm.ident = !{!9}
 
 !0 = distinct !DICompileUnit(language: DW_LANG_C_plus_plus, file: !1, producer: "clang version 4.0.0 ", isOptimized: false, runtimeVersion: 0, emissionKind: FullDebug, enums: !2)
-; The debug$S section should begin with an S_COMPILE3 record that identifies the
+; One .debug$S section should contain an S_COMPILE3 record that identifies the
 ; source language and the version of the compiler based on the DICompileUnit.
 ; CHECK: 	.section	.debug$S,"dr"
-; CHECK: 		.p2align	2
-; CHECK: 		.long	4                       # Debug section magic
-; CHECK: 		.long	241                     # Symbol subsection for foo
-; CHECK: 		.long	Ltmp3-Ltmp2             # Subsection size
-; CHECK: 	Ltmp2:
-; CHECK: 		.short	Ltmp5-Ltmp4           # Record length
-; CHECK: 	Ltmp4:
 ; CHECK: 		.short	4412                  # Record kind: S_COMPILE3
 ; CHECK: 		.long	1                       # Flags and language
 ; CHECK: 		.short	7                     # CPUType
@@ -39,13 +32,9 @@ attributes #0 = { nounwind sspstrong "correctly-rounded-divide-sqrt-fp-math"="fa
 ; CHECK: 		.short	0
 ; CHECK: 		.short	0
 ; CHECK: 		.asciz	"clang version 4.0.0 "  # Null-terminated compiler version string
-; CHECK:  Ltmp5:
+; CHECK-NOT: .short	4412                  # Record kind: S_COMPILE3
 !1 = !DIFile(filename: "D:\5Csrc\5Cscopes\5Cfoo.cpp", directory: "D:\5Csrc\5Cscopes\5Cclang")
 !2 = !{}
-!3 = !{i32 6, !"Linker Options", !4}
-!4 = !{!5, !6}
-!5 = !{!"/DEFAULTLIB:libcmtd.lib"}
-!6 = !{!"/DEFAULTLIB:oldnames.lib"}
 !7 = !{i32 2, !"CodeView", i32 1}
 !8 = !{i32 2, !"Debug Info Version", i32 3}
 !9 = !{!"clang version 4.0.0 "}

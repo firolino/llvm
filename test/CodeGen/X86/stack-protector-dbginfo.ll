@@ -1,4 +1,5 @@
 ; RUN: llc -mtriple=x86_64-apple-darwin < %s -o -
+; RUN: llc -mtriple=x86_64-pc-linux-gnu < %s -o - | FileCheck --check-prefix=IGNORE_INTRIN %s
 
 ; PR16954
 ;
@@ -17,8 +18,22 @@ entry:
   ret i32 %1
 }
 
+define i32 @IgnoreIntrinsicTest() #1 {
+; IGNORE_INTRIN: IgnoreIntrinsicTest:
+  %1 = alloca i32, align 4
+  %2 = bitcast i32* %1 to i8*
+  call void @llvm.dbg.declare(metadata i32* %1, metadata !73, metadata !DIExpression()), !dbg !74
+  store volatile i32 1, i32* %1, align 4
+  %3 = load volatile i32, i32* %1, align 4
+  %4 = mul nsw i32 %3, 42
+  ret i32 %4
+; IGNORE_INTRIN-NOT: callq __stack_chk_fail
+; IGNORE_INTRIN:     .cfi_endproc
+}
+
 ; Function Attrs: nounwind readnone
 declare void @llvm.dbg.value(metadata, i64, metadata, metadata)
+declare void @llvm.dbg.declare(metadata, metadata, metadata)
 
 attributes #0 = { sspreq }
 
@@ -49,7 +64,7 @@ attributes #0 = { sspreq }
 !22 = !{i64* getelementptr inbounds ({ i64, [56 x i8] }, { i64, [56 x i8] }* @a, i32 0, i32 0)}
 !23 = !DILocalVariable(name: "p2", line: 12, arg: 2, scope: !24, file: !10, type: !32)
 !24 = distinct !DISubprogram(name: "min<unsigned long long>", linkageName: "_ZN3__13minIyEERKT_S3_RS1_", line: 12, isLocal: false, isDefinition: true, virtualIndex: 6, flags: DIFlagPrototyped, isOptimized: true, unit: !0, scopeLine: 12, file: !1, scope: !25, type: !27, templateParams: !33, variables: !35)
-!25 = !DINamespace(name: "__1", line: 1, file: !26, scope: null)
+!25 = !DINamespace(name: "__1", scope: null)
 !26 = !DIFile(filename: "main.cpp", directory: "/Users/matt/ryan_bug")
 !27 = !DISubroutineType(types: !28)
 !28 = !{!29, !29, !32}
@@ -93,3 +108,6 @@ attributes #0 = { sspreq }
 !70 = !DILocalVariable(name: "", line: 2, arg: 3, scope: !65, file: !10, type: !50)
 !71 = !DILocation(line: 1, scope: !65, inlinedAt: !40)
 !72 = !{i32 1, !"Debug Info Version", i32 3}
+!73 = !DILocalVariable(name: "x", scope: !74, file: !1, line: 2, type: !13)
+!74 = distinct !DISubprogram(name: "IgnoreIntrinsicTest", linkageName: "IgnoreIntrinsicTest", scope: !1, file: !1, line: 1, type: !13, isLocal: false, isDefinition: true, scopeLine: 1, flags: DIFlagPrototyped, isOptimized: true, unit: !0, variables: !5)
+!75 = !DILocation(line: 2, column: 16, scope: !7)

@@ -16,6 +16,7 @@
 
 #include "IRBindings.h"
 #include "llvm-c/Core.h"
+#include "llvm-c/DebugInfo.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -27,36 +28,6 @@ extern "C" {
 
 typedef struct LLVMOpaqueDIBuilder *LLVMDIBuilderRef;
 
-LLVMDIBuilderRef LLVMNewDIBuilder(LLVMModuleRef m);
-
-void LLVMDIBuilderDestroy(LLVMDIBuilderRef d);
-void LLVMDIBuilderFinalize(LLVMDIBuilderRef d);
-
-LLVMMetadataRef
-LLVMDIBuilderCreateCompileUnit(LLVMDIBuilderRef D, unsigned Language,
-                               const char *File, const char *Dir,
-                               const char *Producer, int Optimized,
-                               const char *Flags, unsigned RuntimeVersion);
-
-LLVMMetadataRef LLVMDIBuilderCreateFile(LLVMDIBuilderRef D, const char *File,
-                                        const char *Dir);
-
-LLVMMetadataRef LLVMDIBuilderCreateLexicalBlock(LLVMDIBuilderRef D,
-                                                LLVMMetadataRef Scope,
-                                                LLVMMetadataRef File,
-                                                unsigned Line, unsigned Column);
-
-LLVMMetadataRef LLVMDIBuilderCreateLexicalBlockFile(LLVMDIBuilderRef D,
-                                                    LLVMMetadataRef Scope,
-                                                    LLVMMetadataRef File,
-                                                    unsigned Discriminator);
-
-LLVMMetadataRef LLVMDIBuilderCreateFunction(
-    LLVMDIBuilderRef D, LLVMMetadataRef Scope, const char *Name,
-    const char *LinkageName, LLVMMetadataRef File, unsigned Line,
-    LLVMMetadataRef CompositeType, int IsLocalToUnit, int IsDefinition,
-    unsigned ScopeLine, unsigned Flags, int IsOptimized);
-
 LLVMMetadataRef LLVMDIBuilderCreateAutoVariable(
     LLVMDIBuilderRef D, LLVMMetadataRef Scope, const char *Name,
     LLVMMetadataRef File, unsigned Line, LLVMMetadataRef Ty, int AlwaysPreserve,
@@ -66,45 +37,6 @@ LLVMMetadataRef LLVMDIBuilderCreateParameterVariable(
     LLVMDIBuilderRef D, LLVMMetadataRef Scope, const char *Name, unsigned ArgNo,
     LLVMMetadataRef File, unsigned Line, LLVMMetadataRef Ty, int AlwaysPreserve,
     unsigned Flags);
-
-LLVMMetadataRef LLVMDIBuilderCreateBasicType(LLVMDIBuilderRef D,
-                                             const char *Name,
-                                             uint64_t SizeInBits,
-                                             unsigned Encoding);
-
-LLVMMetadataRef LLVMDIBuilderCreatePointerType(LLVMDIBuilderRef D,
-                                               LLVMMetadataRef PointeeType,
-                                               uint64_t SizeInBits,
-                                               uint32_t AlignInBits,
-                                               const char *Name);
-
-LLVMMetadataRef
-LLVMDIBuilderCreateSubroutineType(LLVMDIBuilderRef D, LLVMMetadataRef File,
-                                  LLVMMetadataRef ParameterTypes);
-
-LLVMMetadataRef LLVMDIBuilderCreateStructType(
-    LLVMDIBuilderRef D, LLVMMetadataRef Scope, const char *Name,
-    LLVMMetadataRef File, unsigned Line, uint64_t SizeInBits,
-    uint32_t AlignInBits, unsigned Flags, LLVMMetadataRef DerivedFrom,
-    LLVMMetadataRef ElementTypes);
-
-LLVMMetadataRef LLVMDIBuilderCreateReplaceableCompositeType(
-    LLVMDIBuilderRef D, unsigned Tag, const char *Name, LLVMMetadataRef Scope,
-    LLVMMetadataRef File, unsigned Line, unsigned RuntimeLang,
-    uint64_t SizeInBits, uint32_t AlignInBits, unsigned Flags);
-
-LLVMMetadataRef
-LLVMDIBuilderCreateMemberType(LLVMDIBuilderRef D, LLVMMetadataRef Scope,
-                              const char *Name, LLVMMetadataRef File,
-                              unsigned Line, uint64_t SizeInBits,
-                              uint32_t AlignInBits, uint64_t OffsetInBits,
-                              unsigned Flags, LLVMMetadataRef Ty);
-
-LLVMMetadataRef LLVMDIBuilderCreateArrayType(LLVMDIBuilderRef D,
-                                             uint64_t SizeInBits,
-                                             uint32_t AlignInBits,
-                                             LLVMMetadataRef ElementType,
-                                             LLVMMetadataRef Subscripts);
 
 LLVMMetadataRef LLVMDIBuilderCreateTypedef(LLVMDIBuilderRef D,
                                            LLVMMetadataRef Ty, const char *Name,
@@ -132,7 +64,6 @@ LLVMValueRef LLVMDIBuilderInsertDeclareAtEnd(LLVMDIBuilderRef D,
                                              LLVMBasicBlockRef Block);
 
 LLVMValueRef LLVMDIBuilderInsertValueAtEnd(LLVMDIBuilderRef D, LLVMValueRef Val,
-                                           uint64_t Offset,
                                            LLVMMetadataRef VarInfo,
                                            LLVMMetadataRef Expr,
                                            LLVMBasicBlockRef Block);

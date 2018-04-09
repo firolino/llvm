@@ -26,18 +26,15 @@
 ; ASM:         .cv_file        1 "D:\\src\\llvm\\build\\t.cpp"
 ; ASM:         .cv_loc 0 1 7 0 is_stmt 0       # t.cpp:7:0
 ; ASM: .seh_proc f
-; ASM: # BB#0:                                 # %entry
+; ASM: # %bb.0:                                 # %entry
 ; ASM:         subq    $56, %rsp
-; ASM:         #DEBUG_VALUE: f:param <- [%RSP+52]
 ; ASM:         movl    %ecx, 52(%rsp)
 ; ASM: [[prologue_end:\.Ltmp.*]]:
 ; ASM:         .cv_loc 0 1 8 7                 # t.cpp:8:7
 ; ASM:         testl   %ecx, %ecx
 ; ASM:         je      .LBB0_2
+; ASM: # %bb.1:                                 # %if.then
 ; ASM: [[if_start:\.Ltmp.*]]:
-; ASM: # BB#1:                                 # %if.then
-; ASM:         #DEBUG_VALUE: f:param <- [%RSP+52]
-; ASM:         #DEBUG_VALUE: a <- [%RSP+40]
 ; ASM:         .cv_loc 0 1 9 9                 # t.cpp:9:9
 ; ASM:         movl    $42, 40(%rsp)
 ; ASM: [[inline_site1:\.Ltmp.*]]:
@@ -51,8 +48,6 @@
 ; ASM:         jmp     .LBB0_3
 ; ASM: [[else_start:\.Ltmp.*]]:
 ; ASM: .LBB0_2:                                # %if.else
-; ASM:         #DEBUG_VALUE: f:param <- [%RSP+52]
-; ASM:         #DEBUG_VALUE: b <- [%RSP+36]
 ; ASM:         .cv_loc 0 1 13 9                # t.cpp:13:9
 ; ASM:         movl    $42, 36(%rsp)
 ; ASM: [[inline_site2:\.Ltmp.*]]:
@@ -63,12 +58,10 @@
 ; ASM:         .cv_loc 2 1 5 3                 # t.cpp:5:3
 ; ASM:         callq   capture
 ; ASM:         leaq    36(%rsp), %rcx
-; ASM: [[inline_site2_end:\.Ltmp.*]]:
-; ASM: .LBB0_3:                                # %if.end
-; ASM:         .cv_loc 0 1 15 5                # t.cpp:15:5
-; ASM:         callq   capture
 ; ASM: [[else_end:\.Ltmp.*]]:
+; ASM: .LBB0_3:                                # %if.end
 ; ASM:         .cv_loc 0 1 17 1                # t.cpp:17:1
+; ASM:         callq   capture
 ; ASM:         nop
 ; ASM:         addq    $56, %rsp
 ; ASM:         retq
@@ -101,24 +94,24 @@
 ; ASM: .long   116                     # TypeIndex
 ; ASM: .short  0                       # Flags
 ; ASM: .asciz  "v"
-; ASM: .cv_def_range    [[inline_site2]] [[inline_site2_end]], "E\021O\001\000\0000\000\000\000"
+; ASM: .cv_def_range    [[inline_site2]] [[else_end]], "E\021O\001\000\0000\000\000\000"
 ; ASM: .short  4430                    # Record kind: S_INLINESITE_END
 
 ; OBJ:  Subsection [
 ; OBJ:    SubSectionType: Symbols (0xF1)
-; OBJ:    ProcStart {
+; OBJ:    {{.*}}Proc{{.*}}Sym {
 ; OBJ:      DisplayName: f
 ; OBJ:      LinkageName: f
 ; OBJ:    }
-; OBJ:    Local {
+; OBJ:    LocalSym {
 ; OBJ:      Type: int (0x74)
 ; OBJ:      Flags [ (0x1)
 ; OBJ:        IsParameter (0x1)
 ; OBJ:      ]
 ; OBJ:      VarName: param
 ; OBJ:    }
-; OBJ:    DefRangeRegisterRel {
-; OBJ:      BaseRegister: 335
+; OBJ:    DefRangeRegisterRelSym {
+; OBJ:      BaseRegister: RSP (0x14F)
 ; OBJ:      HasSpilledUDTMember: No
 ; OBJ:      OffsetInParent: 0
 ; OBJ:      BasePointerOffset: 52
@@ -128,14 +121,14 @@
 ; OBJ:        Range: 0x4F
 ; OBJ:      }
 ; OBJ:    }
-; OBJ:    Local {
+; OBJ:    LocalSym {
 ; OBJ:      Type: int (0x74)
 ; OBJ:      Flags [ (0x0)
 ; OBJ:      ]
 ; OBJ:      VarName: a
 ; OBJ:    }
-; OBJ:    DefRangeRegisterRel {
-; OBJ:      BaseRegister: 335
+; OBJ:    DefRangeRegisterRelSym {
+; OBJ:      BaseRegister: RSP (0x14F)
 ; OBJ:      HasSpilledUDTMember: No
 ; OBJ:      OffsetInParent: 0
 ; OBJ:      BasePointerOffset: 40
@@ -145,24 +138,24 @@
 ; OBJ:        Range: 0x21
 ; OBJ:      }
 ; OBJ:    }
-; OBJ:    Local {
+; OBJ:    LocalSym {
 ; OBJ:      Type: int (0x74)
 ; OBJ:      Flags [ (0x0)
 ; OBJ:      ]
 ; OBJ:      VarName: b
 ; OBJ:    }
-; OBJ:    DefRangeRegisterRel {
-; OBJ:      BaseRegister: 335
+; OBJ:    DefRangeRegisterRelSym {
+; OBJ:      BaseRegister: RSP (0x14F)
 ; OBJ:      HasSpilledUDTMember: No
 ; OBJ:      OffsetInParent: 0
 ; OBJ:      BasePointerOffset: 36
 ; OBJ:      LocalVariableAddrRange {
 ; OBJ:        OffsetStart: .text+0x2D
 ; OBJ:        ISectStart: 0x0
-; OBJ:        Range: 0x24
+; OBJ:        Range: 0x1F
 ; OBJ:      }
 ; OBJ:    }
-; OBJ:    InlineSite {
+; OBJ:    InlineSiteSym {
 ; OBJ:      PtrParent: 0x0
 ; OBJ:      PtrEnd: 0x0
 ; OBJ:      Inlinee: will_be_inlined (0x1002)
@@ -173,14 +166,14 @@
 ; OBJ:        ChangeCodeLength: 0xC
 ; OBJ:      ]
 ; OBJ:    }
-; OBJ:    Local {
+; OBJ:    LocalSym {
 ; OBJ:      Type: int (0x74)
 ; OBJ:      Flags [ (0x0)
 ; OBJ:      ]
 ; OBJ:      VarName: v
 ; OBJ:    }
-; OBJ:    DefRangeRegisterRel {
-; OBJ:      BaseRegister: 335
+; OBJ:    DefRangeRegisterRelSym {
+; OBJ:      BaseRegister: RSP (0x14F)
 ; OBJ:      HasSpilledUDTMember: No
 ; OBJ:      OffsetInParent: 0
 ; OBJ:      BasePointerOffset: 44
@@ -192,7 +185,7 @@
 ; OBJ:    }
 ; OBJ:    InlineSiteEnd {
 ; OBJ:    }
-; OBJ:    InlineSite {
+; OBJ:    InlineSiteSym {
 ; OBJ:      PtrParent: 0x0
 ; OBJ:      PtrEnd: 0x0
 ; OBJ:      Inlinee: will_be_inlined (0x1002)
@@ -203,14 +196,14 @@
 ; OBJ:        ChangeCodeLength: 0xA
 ; OBJ:      ]
 ; OBJ:    }
-; OBJ:    Local {
+; OBJ:    LocalSym {
 ; OBJ:      Type: int (0x74)
 ; OBJ:      Flags [ (0x0)
 ; OBJ:      ]
 ; OBJ:      VarName: v
 ; OBJ:    }
-; OBJ:    DefRangeRegisterRel {
-; OBJ:      BaseRegister: 335
+; OBJ:    DefRangeRegisterRelSym {
+; OBJ:      BaseRegister: RSP (0x14F)
 ; OBJ:      HasSpilledUDTMember: No
 ; OBJ:      OffsetInParent: 0
 ; OBJ:      BasePointerOffset: 48

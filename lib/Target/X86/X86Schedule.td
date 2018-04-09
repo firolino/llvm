@@ -39,20 +39,33 @@ multiclass X86SchedWritePair {
   }
 }
 
+// Loads, stores, and moves, not folded with other operations.
+def WriteLoad  : SchedWrite;
+def WriteStore : SchedWrite;
+def WriteMove  : SchedWrite;
+
 // Arithmetic.
 defm WriteALU  : X86SchedWritePair; // Simple integer ALU op.
+def WriteALURMW : WriteSequence<[WriteALULd, WriteStore]>;
 defm WriteIMul : X86SchedWritePair; // Integer multiplication.
 def  WriteIMulH : SchedWrite;       // Integer multiplication, high part.
 defm WriteIDiv : X86SchedWritePair; // Integer division.
 def  WriteLEA  : SchedWrite;        // LEA instructions can't fold loads.
 
+defm WriteBitScan : X86SchedWritePair; // Bit scan forward/reverse.
+defm WritePOPCNT : X86SchedWritePair; // Bit population count.
+defm WriteLZCNT : X86SchedWritePair; // Leading zero count.
+defm WriteTZCNT : X86SchedWritePair; // Trailing zero count.
+defm WriteCMOV : X86SchedWritePair; // Conditional move.
+def  WriteSETCC : SchedWrite; // Set register based on condition code.
+def  WriteSETCCStore : SchedWrite;
+
 // Integer shifts and rotates.
 defm WriteShift : X86SchedWritePair;
 
-// Loads, stores, and moves, not folded with other operations.
-def WriteLoad  : SchedWrite;
-def WriteStore : SchedWrite;
-def WriteMove  : SchedWrite;
+// BMI1 BEXTR, BMI2 BZHI
+defm WriteBEXTR : X86SchedWritePair;
+defm WriteBZHI  : X86SchedWritePair;
 
 // Idioms that clear a register, like xorps %xmm0, %xmm0.
 // These can often bypass execution ports completely.
@@ -63,6 +76,9 @@ def WriteZero : SchedWrite;
 defm WriteJump : X86SchedWritePair;
 
 // Floating point. This covers both scalar and vector operations.
+def  WriteFLoad  : SchedWrite;
+def  WriteFStore : SchedWrite;
+def  WriteFMove  : SchedWrite;
 defm WriteFAdd   : X86SchedWritePair; // Floating point add/sub/compare.
 defm WriteFMul   : X86SchedWritePair; // Floating point multiplication.
 defm WriteFDiv   : X86SchedWritePair; // Floating point division.
@@ -77,10 +93,18 @@ defm WriteFVarBlend  : X86SchedWritePair; // Fp vector variable blends.
 // FMA Scheduling helper class.
 class FMASC { X86FoldableSchedWrite Sched = WriteFAdd; }
 
+// Horizontal Add/Sub (float and integer)
+defm WriteFHAdd  : X86SchedWritePair;
+defm WritePHAdd : X86SchedWritePair;
+
 // Vector integer operations.
+def  WriteVecLoad  : SchedWrite;
+def  WriteVecStore : SchedWrite;
+def  WriteVecMove  : SchedWrite;
 defm WriteVecALU   : X86SchedWritePair; // Vector integer ALU op, no logicals.
 defm WriteVecShift : X86SchedWritePair; // Vector integer shifts.
 defm WriteVecIMul  : X86SchedWritePair; // Vector integer multiply.
+defm WritePMULLD : X86SchedWritePair; // PMULLD
 defm WriteShuffle  : X86SchedWritePair; // Vector shuffles.
 defm WriteBlend  : X86SchedWritePair; // Vector blends.
 defm WriteVarBlend  : X86SchedWritePair; // Vector variable blends.
@@ -90,10 +114,18 @@ defm WriteMPSAD : X86SchedWritePair; // Vector MPSAD.
 // These are often used on both floating point and integer vectors.
 defm WriteVecLogic : X86SchedWritePair; // Vector and/or/xor.
 
+// MOVMSK operations.
+def WriteFMOVMSK : SchedWrite;
+def WriteVecMOVMSK : SchedWrite;
+def WriteMMXMOVMSK : SchedWrite;
+
 // Conversion between integer and float.
 defm WriteCvtF2I : X86SchedWritePair; // Float -> Integer.
 defm WriteCvtI2F : X86SchedWritePair; // Integer -> Float.
 defm WriteCvtF2F : X86SchedWritePair; // Float -> Float size conversion.
+
+// CRC32 instruction.
+defm WriteCRC32 : X86SchedWritePair;
 
 // Strings instructions.
 // Packed Compare Implicit Length Strings, Return Mask
@@ -136,19 +168,23 @@ def IIC_ALU_MEM     : InstrItinClass;
 def IIC_ALU_NONMEM  : InstrItinClass;
 def IIC_LEA         : InstrItinClass;
 def IIC_LEA_16      : InstrItinClass;
-def IIC_MUL8        : InstrItinClass;
+def IIC_MUL8_MEM    : InstrItinClass;
+def IIC_MUL8_REG    : InstrItinClass;
 def IIC_MUL16_MEM   : InstrItinClass;
 def IIC_MUL16_REG   : InstrItinClass;
 def IIC_MUL32_MEM   : InstrItinClass;
 def IIC_MUL32_REG   : InstrItinClass;
-def IIC_MUL64       : InstrItinClass;
+def IIC_MUL64_MEM   : InstrItinClass;
+def IIC_MUL64_REG   : InstrItinClass;
 // imul by al, ax, eax, tax
-def IIC_IMUL8       : InstrItinClass;
+def IIC_IMUL8_MEM   : InstrItinClass;
+def IIC_IMUL8_REG   : InstrItinClass;
 def IIC_IMUL16_MEM  : InstrItinClass;
 def IIC_IMUL16_REG  : InstrItinClass;
 def IIC_IMUL32_MEM  : InstrItinClass;
 def IIC_IMUL32_REG  : InstrItinClass;
-def IIC_IMUL64      : InstrItinClass;
+def IIC_IMUL64_MEM  : InstrItinClass;
+def IIC_IMUL64_REG  : InstrItinClass;
 // imul reg by reg|mem
 def IIC_IMUL16_RM   : InstrItinClass;
 def IIC_IMUL16_RR   : InstrItinClass;
@@ -166,14 +202,21 @@ def IIC_IMUL64_RRI  : InstrItinClass;
 // div
 def IIC_DIV8_MEM    : InstrItinClass;
 def IIC_DIV8_REG    : InstrItinClass;
-def IIC_DIV16       : InstrItinClass;
-def IIC_DIV32       : InstrItinClass;
-def IIC_DIV64       : InstrItinClass;
+def IIC_DIV16_MEM   : InstrItinClass;
+def IIC_DIV16_REG   : InstrItinClass;
+def IIC_DIV32_MEM   : InstrItinClass;
+def IIC_DIV32_REG   : InstrItinClass;
+def IIC_DIV64_MEM   : InstrItinClass;
+def IIC_DIV64_REG   : InstrItinClass;
 // idiv
-def IIC_IDIV8       : InstrItinClass;
-def IIC_IDIV16      : InstrItinClass;
-def IIC_IDIV32      : InstrItinClass;
-def IIC_IDIV64      : InstrItinClass;
+def IIC_IDIV8_MEM   : InstrItinClass;
+def IIC_IDIV8_REG   : InstrItinClass;
+def IIC_IDIV16_MEM  : InstrItinClass;
+def IIC_IDIV16_REG  : InstrItinClass;
+def IIC_IDIV32_MEM  : InstrItinClass;
+def IIC_IDIV32_REG  : InstrItinClass;
+def IIC_IDIV64_MEM  : InstrItinClass;
+def IIC_IDIV64_REG  : InstrItinClass;
 // neg/not/inc/dec
 def IIC_UNARY_REG   : InstrItinClass;
 def IIC_UNARY_MEM   : InstrItinClass;
@@ -232,8 +275,6 @@ def IIC_RET_IMM : InstrItinClass;
 def IIC_MOVSX : InstrItinClass;
 def IIC_MOVSX_R16_R8 : InstrItinClass;
 def IIC_MOVSX_R16_M8 : InstrItinClass;
-def IIC_MOVSX_R16_R16 : InstrItinClass;
-def IIC_MOVSX_R32_R32 : InstrItinClass;
 //zero extension movs
 def IIC_MOVZX : InstrItinClass;
 def IIC_MOVZX_R16_R8 : InstrItinClass;
@@ -295,6 +336,7 @@ def IIC_SSE_SHUFP : InstrItinClass;
 def IIC_SSE_PSHUF_RI : InstrItinClass;
 def IIC_SSE_PSHUF_MI : InstrItinClass;
 
+def IIC_SSE_PACK : InstrItinClass;
 def IIC_SSE_UNPCK : InstrItinClass;
 
 def IIC_SSE_MOVMSK : InstrItinClass;
@@ -366,6 +408,7 @@ def IIC_SSE_MWAIT : InstrItinClass;
 def IIC_SSE_MONITOR : InstrItinClass;
 def IIC_SSE_MWAITX : InstrItinClass;
 def IIC_SSE_MONITORX : InstrItinClass;
+def IIC_SSE_CLZERO : InstrItinClass;
 
 def IIC_SSE_PREFETCH : InstrItinClass;
 def IIC_SSE_PAUSE : InstrItinClass;
@@ -379,8 +422,6 @@ def IIC_SSE_CVT_PD_RR : InstrItinClass;
 def IIC_SSE_CVT_PD_RM : InstrItinClass;
 def IIC_SSE_CVT_PS_RR : InstrItinClass;
 def IIC_SSE_CVT_PS_RM : InstrItinClass;
-def IIC_SSE_CVT_PI2PS_RR : InstrItinClass;
-def IIC_SSE_CVT_PI2PS_RM : InstrItinClass;
 def IIC_SSE_CVT_Scalar_RR : InstrItinClass;
 def IIC_SSE_CVT_Scalar_RM : InstrItinClass;
 def IIC_SSE_CVT_SS2SI32_RM : InstrItinClass;
@@ -389,6 +430,8 @@ def IIC_SSE_CVT_SS2SI64_RM : InstrItinClass;
 def IIC_SSE_CVT_SS2SI64_RR : InstrItinClass;
 def IIC_SSE_CVT_SD2SI_RM : InstrItinClass;
 def IIC_SSE_CVT_SD2SI_RR : InstrItinClass;
+
+def IIC_AVX_ZERO : InstrItinClass;
 
 // MMX
 def IIC_MMX_MOV_MM_RM : InstrItinClass;
@@ -420,11 +463,20 @@ def IIC_MMX_PSHUF : InstrItinClass;
 def IIC_MMX_PEXTR : InstrItinClass;
 def IIC_MMX_PINSRW : InstrItinClass;
 def IIC_MMX_MASKMOV : InstrItinClass;
-
+def IIC_MMX_MOVMSK : InstrItinClass;
 def IIC_MMX_CVT_PD_RR : InstrItinClass;
 def IIC_MMX_CVT_PD_RM : InstrItinClass;
 def IIC_MMX_CVT_PS_RR : InstrItinClass;
 def IIC_MMX_CVT_PS_RM : InstrItinClass;
+
+def IIC_3DNOW_FALU_RM : InstrItinClass;
+def IIC_3DNOW_FALU_RR : InstrItinClass;
+def IIC_3DNOW_FCVT_F2I_RM : InstrItinClass;
+def IIC_3DNOW_FCVT_F2I_RR : InstrItinClass;
+def IIC_3DNOW_FCVT_I2F_RM : InstrItinClass;
+def IIC_3DNOW_FCVT_I2F_RR : InstrItinClass;
+def IIC_3DNOW_MISC_FUNC_REG : InstrItinClass;
+def IIC_3DNOW_MISC_FUNC_MEM : InstrItinClass;
 
 def IIC_CMPX_LOCK : InstrItinClass;
 def IIC_CMPX_LOCK_8 : InstrItinClass;
@@ -434,6 +486,7 @@ def IIC_CMPX_LOCK_16B : InstrItinClass;
 def IIC_XADD_LOCK_MEM : InstrItinClass;
 def IIC_XADD_LOCK_MEM8 : InstrItinClass;
 
+def IIC_FCMOV : InstrItinClass;
 def IIC_FILD : InstrItinClass;
 def IIC_FLD : InstrItinClass;
 def IIC_FLD80 : InstrItinClass;
@@ -462,6 +515,8 @@ def IIC_FXTRACT : InstrItinClass;
 def IIC_FPREM1 : InstrItinClass;
 def IIC_FPSTP : InstrItinClass;
 def IIC_FPREM : InstrItinClass;
+def IIC_FSIGN : InstrItinClass;
+def IIC_FSQRT : InstrItinClass;
 def IIC_FYL2XP1 : InstrItinClass;
 def IIC_FSINCOS : InstrItinClass;
 def IIC_FRNDINT : InstrItinClass;
@@ -478,16 +533,31 @@ def IIC_INT : InstrItinClass;
 def IIC_INT3 : InstrItinClass;
 def IIC_INVD : InstrItinClass;
 def IIC_INVLPG : InstrItinClass;
+def IIC_INVPCID : InstrItinClass;
 def IIC_IRET : InstrItinClass;
 def IIC_HLT : InstrItinClass;
 def IIC_LXS : InstrItinClass;
 def IIC_LTR : InstrItinClass;
+def IIC_MPX : InstrItinClass;
+def IIC_PKU : InstrItinClass;
+def IIC_PTWRITE : InstrItinClass;
+def IIC_RDPID : InstrItinClass;
+def IIC_RDRAND : InstrItinClass;
+def IIC_RDSEED : InstrItinClass;
 def IIC_RDTSC : InstrItinClass;
+def IIC_RDTSCP : InstrItinClass;
 def IIC_RSM : InstrItinClass;
 def IIC_SIDT : InstrItinClass;
 def IIC_SGDT : InstrItinClass;
 def IIC_SLDT : InstrItinClass;
+def IIC_SMAP : InstrItinClass;
+def IIC_SMX : InstrItinClass;
 def IIC_STR : InstrItinClass;
+def IIC_SKINIT : InstrItinClass;
+def IIC_SVM : InstrItinClass;
+def IIC_VMX : InstrItinClass;
+def IIC_CLGI : InstrItinClass;
+def IIC_STGI : InstrItinClass;
 def IIC_SWAPGS : InstrItinClass;
 def IIC_SYSCALL : InstrItinClass;
 def IIC_SYS_ENTER_EXIT : InstrItinClass;
@@ -496,6 +566,7 @@ def IIC_IN_RI : InstrItinClass;
 def IIC_OUT_RR : InstrItinClass;
 def IIC_OUT_IR : InstrItinClass;
 def IIC_INS : InstrItinClass;
+def IIC_LWP : InstrItinClass;
 def IIC_MOV_REG_DR : InstrItinClass;
 def IIC_MOV_DR_REG : InstrItinClass;
 def IIC_MOV_REG_CR : InstrItinClass;
@@ -516,6 +587,8 @@ def IIC_PUSH_CS : InstrItinClass;
 def IIC_PUSH_SR : InstrItinClass;
 def IIC_POP_SR : InstrItinClass;
 def IIC_POP_SR_SS : InstrItinClass;
+def IIC_SEGMENT_BASE_R : InstrItinClass;
+def IIC_SEGMENT_BASE_W : InstrItinClass;
 def IIC_VERR : InstrItinClass;
 def IIC_VERW_REG : InstrItinClass;
 def IIC_VERW_MEM : InstrItinClass;
@@ -541,6 +614,10 @@ def IIC_PUSH_A : InstrItinClass;
 def IIC_BSWAP : InstrItinClass;
 def IIC_BIT_SCAN_MEM : InstrItinClass;
 def IIC_BIT_SCAN_REG : InstrItinClass;
+def IIC_LZCNT_RR : InstrItinClass;
+def IIC_LZCNT_RM : InstrItinClass;
+def IIC_TZCNT_RR : InstrItinClass;
+def IIC_TZCNT_RM : InstrItinClass;
 def IIC_MOVS : InstrItinClass;
 def IIC_STOS : InstrItinClass;
 def IIC_SCAS : InstrItinClass;
@@ -568,12 +645,10 @@ def IIC_CMPXCHG_8B : InstrItinClass;
 def IIC_CMPXCHG_16B : InstrItinClass;
 def IIC_LODS : InstrItinClass;
 def IIC_OUTS : InstrItinClass;
-def IIC_CLC : InstrItinClass;
+def IIC_CLC_CMC_STC : InstrItinClass;
 def IIC_CLD : InstrItinClass;
 def IIC_CLI : InstrItinClass;
-def IIC_CMC : InstrItinClass;
 def IIC_CLTS : InstrItinClass;
-def IIC_STC : InstrItinClass;
 def IIC_STI : InstrItinClass;
 def IIC_STD : InstrItinClass;
 def IIC_XLAT : InstrItinClass;
@@ -652,10 +727,4 @@ def GenericModel : GenericX86Model;
 def GenericPostRAModel : GenericX86Model {
   let PostRAScheduler = 1;
 }
-
-include "X86ScheduleAtom.td"
-include "X86SchedSandyBridge.td"
-include "X86SchedHaswell.td"
-include "X86ScheduleSLM.td"
-include "X86ScheduleBtVer2.td"
 

@@ -119,6 +119,8 @@ def FeatureMSYNC     : SubtargetFeature<"msync", "HasOnlyMSYNC", "true",
                               [FeatureBookE]>;
 def FeatureE500      : SubtargetFeature<"e500", "IsE500", "true",
                                         "Enable E500/E500mc instructions">;
+def FeatureSecurePlt : SubtargetFeature<"secure-plt","SecurePlt", "true",
+                                        "Enable secure plt mode">;
 def FeaturePPC4xx    : SubtargetFeature<"ppc4xx", "IsPPC4xx", "true",
                                         "Enable PPC 4xx instructions">;
 def FeaturePPC6xx    : SubtargetFeature<"ppc6xx", "IsPPC6xx", "true",
@@ -289,7 +291,6 @@ def getAltVSXFMAOpcode : InstrMapping {
 
 include "PPCRegisterInfo.td"
 include "PPCSchedule.td"
-include "PPCInstrInfo.td"
 
 //===----------------------------------------------------------------------===//
 // PowerPC processors supported.
@@ -418,8 +419,7 @@ def : ProcessorModel<"pwr6x", G5Model,
                    FeatureMFTB, DeprecatedDST]>;
 def : ProcessorModel<"pwr7", P7Model, ProcessorFeatures.Power7FeatureList>;
 def : ProcessorModel<"pwr8", P8Model, ProcessorFeatures.Power8FeatureList>;
-// FIXME: Same as P8 until the POWER9 scheduling info is available
-def : ProcessorModel<"pwr9", P8Model, ProcessorFeatures.Power9FeatureList>;
+def : ProcessorModel<"pwr9", P9Model, ProcessorFeatures.Power9FeatureList>; 
 def : Processor<"ppc", G3Itineraries, [Directive32, FeatureHardFloat,
                                        FeatureMFTB]>;
 def : Processor<"ppc32", G3Itineraries, [Directive32, FeatureHardFloat,
@@ -467,4 +467,5 @@ def PPC : Target {
 
   let AssemblyParsers = [PPCAsmParser];
   let AssemblyParserVariants = [PPCAsmParserVariant];
+  let AllowRegisterRenaming = 1;
 }

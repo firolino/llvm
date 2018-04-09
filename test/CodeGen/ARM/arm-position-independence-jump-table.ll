@@ -47,11 +47,10 @@ lab4:
 
 ; CHECK-LABEL: jump_table:
 
-; ARM: lsl     r[[R_TAB_IDX:[0-9]+]], r{{[0-9]+}}, #2
 ; ARM: adr     r[[R_TAB_BASE:[0-9]+]], [[LJTI:\.LJTI[0-9]+_[0-9]+]]
-; ARM_ABS: ldr     pc, [r[[R_TAB_IDX]], r[[R_TAB_BASE]]]
-; ARM_PC:  ldr     r[[R_OFFSET:[0-9]+]], [r[[R_TAB_IDX]], r[[R_TAB_BASE]]]
-; ARM_PC:  add     pc, r[[R_OFFSET]], r[[R_TAB_BASE]]
+; ARM_ABS: ldr     pc, [r[[R_TAB_BASE]], r{{[0-9]+}}, lsl #2]
+; ARM_PC:  ldr     r[[R_OFFSET:[0-9]+]], [r[[R_TAB_BASE]], r{{[0-9]+}}, lsl #2]
+; ARM_PC:  add     pc, r[[R_TAB_BASE]], r[[R_OFFSET]]
 ; ARM: [[LJTI]]
 ; ARM_ABS: .long [[LBB1:\.LBB[0-9]+_[0-9]+]]
 ; ARM_ABS: .long [[LBB2:\.LBB[0-9]+_[0-9]+]]
@@ -85,12 +84,13 @@ lab4:
 ; THUMB2: [[LBB4]]
 ; THUMB2-NEXT: b exit4
 
-
+; THUMB1: .p2align 2
 ; THUMB1: add     r[[x:[0-9]+]], pc
 ; THUMB1: ldrb    r[[x]], [r[[x]], #4]
 ; THUMB1: lsls    r[[x]], r[[x]], #1
 ; THUMB1: [[LCPI:\.LCPI[0-9]+_[0-9]+]]:
 ; THUMB1: add     pc, r[[x]]
+; THUMB1: .p2align 2
 ; THUMB1: .byte   ([[LBB1:\.LBB[0-9]+_[0-9]+]]-([[LCPI]]+4))/2
 ; THUMB1: .byte   ([[LBB2:\.LBB[0-9]+_[0-9]+]]-([[LCPI]]+4))/2
 ; THUMB1: .byte   ([[LBB3:\.LBB[0-9]+_[0-9]+]]-([[LCPI]]+4))/2

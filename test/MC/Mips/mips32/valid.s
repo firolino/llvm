@@ -1,14 +1,17 @@
 # Instructions that are valid
 #
-# RUN: llvm-mc %s -triple=mips-unknown-linux -show-encoding -mcpu=mips32 | FileCheck %s
+# RUN: llvm-mc %s -triple=mips-unknown-linux -show-encoding -show-inst -mcpu=mips32 | FileCheck %s
 a:
         .set noat
-        abs.d     $f7,$f25             # CHECK: encoding:
-        abs.s     $f9,$f16
+        abs.d     $f0,$f12             # CHECK: abs.d  $f0, $f12 # encoding: [0x46,0x20,0x60,0x05]
+                                       # CHECK-NEXT:             # <MCInst #{{[0-9]+}} FABS_D32
+        abs.s     $f0,$f12             # CHECK: abs.s  $f0, $f12 # encoding: [0x46,0x00,0x60,0x05]
+                                       # CHECK-NEXT:             # <MCInst #{{[0-9]+}} FABS_S
         add       $s7,$s2,$a1
         add       $9,$14,15176         # CHECK: addi $9, $14, 15176   # encoding: [0x21,0xc9,0x3b,0x48]
         add       $24,-7193            # CHECK: addi $24, $24, -7193  # encoding: [0x23,0x18,0xe3,0xe7]
-        add.d     $f1,$f7,$f29
+        add.d     $f0, $f2, $f4        # CHECK: add.d   $f0, $f2, $f4 # encoding: [0x46,0x24,0x10,0x00]
+                                       # CHECK-NEXT:                  # <MCInst #{{[0-9]+}} FADD_D32
         add.s     $f8,$f21,$f24
         addi      $13,$9,26322
         addi      $8,$8,~1             # CHECK: addi $8, $8, -2 # encoding: [0x21,0x08,0xff,0xfe]
@@ -41,25 +44,58 @@ a:
         bltzl     $s1,-9964            # CHECK: bltzl $17, -9964     # encoding: [0x06,0x22,0xf6,0x45]
         bnel      $gp,$s4,5107         # CHECK: bnel $gp, $20, 5107  # encoding: [0x57,0x94,0x04,0xfc]
         cache     1, 8($5)             # CHECK: cache 1, 8($5)       # encoding: [0xbc,0xa1,0x00,0x08]
-        c.ngl.d   $f29,$f29
-        c.ngle.d  $f0,$f16
-        c.sf.d    $f30,$f0
-        c.sf.s    $f14,$f22
+        c.eq.d    $fcc1, $f14, $f14    # CHECK: c.eq.d    $fcc1, $f14, $f14       # encoding: [0x46,0x2e,0x71,0x32]
+        c.eq.s    $fcc5, $f24, $f17    # CHECK: c.eq.s    $fcc5, $f24, $f17       # encoding: [0x46,0x11,0xc5,0x32]
+        c.f.d     $fcc4, $f10, $f20    # CHECK: c.f.d     $fcc4, $f10, $f20       # encoding: [0x46,0x34,0x54,0x30]
+        c.f.s     $fcc4, $f30, $f7     # CHECK: c.f.s     $fcc4, $f30, $f7        # encoding: [0x46,0x07,0xf4,0x30]
+        c.le.d    $fcc4, $f18, $f0     # CHECK: c.le.d    $fcc4, $f18, $f0        # encoding: [0x46,0x20,0x94,0x3e]
+        c.le.s    $fcc6, $f24, $f4     # CHECK: c.le.s    $fcc6, $f24, $f4        # encoding: [0x46,0x04,0xc6,0x3e]
+        c.lt.d    $fcc3, $f8, $f2      # CHECK: c.lt.d    $fcc3, $f8, $f2         # encoding: [0x46,0x22,0x43,0x3c]
+        c.lt.s    $fcc2, $f17, $f14    # CHECK: c.lt.s    $fcc2, $f17, $f14       # encoding: [0x46,0x0e,0x8a,0x3c]
+        c.nge.d   $fcc5, $f20, $f16    # CHECK: c.nge.d   $fcc5, $f20, $f16       # encoding: [0x46,0x30,0xa5,0x3d]
+        c.nge.s   $fcc3, $f11, $f8     # CHECK: c.nge.s   $fcc3, $f11, $f8        # encoding: [0x46,0x08,0x5b,0x3d]
+        c.ngl.s   $fcc2, $f31, $f23    # CHECK: c.ngl.s   $fcc2, $f31, $f23       # encoding: [0x46,0x17,0xfa,0x3b]
+        c.ngle.s  $fcc2, $f18, $f23    # CHECK: c.ngle.s  $fcc2, $f18, $f23       # encoding: [0x46,0x17,0x92,0x39]
+        c.ngl.d   $f28, $f28           # CHECK: c.ngl.d   $f28, $f28              # encoding: [0x46,0x3c,0xe0,0x3b]
+        c.ngle.d  $f0, $f16            # CHECK: c.ngle.d  $f0, $f16               # encoding: [0x46,0x30,0x00,0x39]
+        c.ngt.d   $fcc4, $f24, $f6     # CHECK: c.ngt.d   $fcc4, $f24, $f6        # encoding: [0x46,0x26,0xc4,0x3f]
+        c.ngt.s   $fcc5, $f8, $f13     # CHECK: c.ngt.s   $fcc5, $f8, $f13        # encoding: [0x46,0x0d,0x45,0x3f]
+        c.ole.d   $fcc2, $f16, $f30    # CHECK: c.ole.d   $fcc2, $f16, $f30       # encoding: [0x46,0x3e,0x82,0x36]
+        c.ole.s   $fcc3, $f7, $f20     # CHECK: c.ole.s   $fcc3, $f7, $f20        # encoding: [0x46,0x14,0x3b,0x36]
+        c.olt.d   $fcc4, $f18, $f28    # CHECK: c.olt.d   $fcc4, $f18, $f28       # encoding: [0x46,0x3c,0x94,0x34]
+        c.olt.s   $fcc6, $f20, $f7     # CHECK: c.olt.s   $fcc6, $f20, $f7        # encoding: [0x46,0x07,0xa6,0x34]
+        c.seq.d   $fcc4, $f30, $f6     # CHECK: c.seq.d   $fcc4, $f30, $f6        # encoding: [0x46,0x26,0xf4,0x3a]
+        c.seq.s   $fcc7, $f1, $f25     # CHECK: c.seq.s   $fcc7, $f1, $f25        # encoding: [0x46,0x19,0x0f,0x3a]
+        c.sf.d    $f30, $f0            # CHECK: c.sf.d    $f30, $f0               # encoding: [0x46,0x20,0xf0,0x38]
+        c.sf.s    $f14, $f22           # CHECK: c.sf.s    $f14, $f22              # encoding: [0x46,0x16,0x70,0x38]
+        c.ueq.d   $fcc4, $f12, $f24    # CHECK: c.ueq.d   $fcc4, $f12, $f24       # encoding: [0x46,0x38,0x64,0x33]
+        c.ueq.s   $fcc6, $f3, $f30     # CHECK: c.ueq.s   $fcc6, $f3, $f30        # encoding: [0x46,0x1e,0x1e,0x33]
+        c.ule.d   $fcc7, $f24, $f18    # CHECK: c.ule.d   $fcc7, $f24, $f18       # encoding: [0x46,0x32,0xc7,0x37]
+        c.ule.s   $fcc7, $f21, $f30    # CHECK: c.ule.s   $fcc7, $f21, $f30       # encoding: [0x46,0x1e,0xaf,0x37]
+        c.ult.d   $fcc6, $f6, $f16     # CHECK: c.ult.d   $fcc6, $f6, $f16        # encoding: [0x46,0x30,0x36,0x35]
+        c.ult.s   $fcc7, $f24, $f10    # CHECK: c.ult.s   $fcc7, $f24, $f10       # encoding: [0x46,0x0a,0xc7,0x35]
+        c.un.d    $fcc6, $f22, $f24    # CHECK: c.un.d    $fcc6, $f22, $f24       # encoding: [0x46,0x38,0xb6,0x31]
+        c.un.s    $fcc1, $f30, $f4     # CHECK: c.un.s    $fcc1, $f30, $f4        # encoding: [0x46,0x04,0xf1,0x31]
         ceil.w.d  $f11,$f25
         ceil.w.s  $f6,$f20
         cfc1      $s1,$21
         clo       $11,$a1              # CHECK: clo $11, $5   # encoding: [0x70,0xab,0x58,0x21]
         clz       $sp,$gp              # CHECK: clz $sp, $gp  # encoding: [0x73,0x9d,0xe8,0x20]
         ctc1      $a2,$26
-        cvt.d.s   $f22,$f28
-        cvt.d.w   $f26,$f11
-        cvt.s.d   $f26,$f8
+        cvt.d.s   $f0,$f2              # CHECK: cvt.d.s $f0, $f2         # encoding: [0x46,0x00,0x10,0x21]
+                                       # CHECK-NEXT:                     # <MCInst #{{[0-9]+}} CVT_D32_S
+        cvt.d.w   $f0,$f2              # CHECK: cvt.d.w $f0, $f2         # encoding: [0x46,0x80,0x10,0x21]
+                                       # CHECK-NEXT:                     # <MCInst #{{[0-9]+}} CVT_D32_W
+        cvt.s.d   $f0,$f2              # CHECK: cvt.s.d $f0, $f2         # encoding: [0x46,0x20,0x10,0x20]
+                                       # CHECK-NEXT:                     # <MCInst #{{[0-9]+}} CVT_S_D32
         cvt.s.w   $f22,$f15
-        cvt.w.d   $f20,$f14
+        cvt.w.d   $f0,$f2              # CHECK: cvt.w.d $f0, $f2         # encoding: [0x46,0x20,0x10,0x24]
+                                       # CHECK-NEXT:                     # <MCInst #{{[0-9]+}} CVT_W_D32
         cvt.w.s   $f20,$f24
         deret
         div       $zero,$25,$11
-        div.d     $f29,$f20,$f27
+        div.d     $f0, $f2, $f4        # CHECK: div.d $f0, $f2, $f4      # encoding: [0x46,0x24,0x10,0x03]
+                                       # CHECK-NEXT:                     # <MCInst #{{[0-9]+}} FDIV_D32
         div.s     $f4,$f5,$f15
         divu      $zero,$25,$15
         ehb                            # CHECK: ehb # encoding:  [0x00,0x00,0x00,0xc0]
@@ -97,7 +133,8 @@ a:
         mfhi      $s3
         mfhi      $sp
         mflo      $s1
-        mov.d     $f20,$f14
+        mov.d     $f0,$f2              # CHECK: mov.d $f0, $f2         # encoding: [0x46,0x20,0x10,0x06]
+                                       # CHECK-NEXT:                   # <MCInst #{{[0-9]+}} FMOV_D32
         mov.s     $f2,$f27
         move      $s8,$a0              # CHECK: move $fp, $4             # encoding: [0x00,0x80,0xf0,0x25]
         move      $25,$a2              # CHECK: move $25, $6             # encoding: [0x00,0xc0,0xc8,0x25]
@@ -121,7 +158,8 @@ a:
         mtlo      $sp
         mtlo      $25
         mul       $s0,$s4,$at
-        mul.d     $f20,$f20,$f16
+        mul.d     $f0, $f2, $f4        # CHECK: mul.d $f0, $f2, $f4   # encoding: [0x46,0x24,0x10,0x02]
+                                       # CHECK-NEXT:                  # <MCInst #{{[0-9]+}} FMUL_D32
         mul.s     $f30,$f10,$f2
         mult      $sp,$s4
         mult      $sp,$v0
@@ -131,10 +169,13 @@ a:
         neg       $2, $3               # CHECK: neg  $2, $3            # encoding: [0x00,0x03,0x10,0x22]
         negu      $2                   # CHECK: negu $2, $2            # encoding: [0x00,0x02,0x10,0x23]
         negu      $2,$3                # CHECK: negu $2, $3            # encoding: [0x00,0x03,0x10,0x23]
-        neg.d     $f27,$f18
+        neg.d     $f0,$f2              # CHECK: neg.d $f0, $f2         # encoding: [0x46,0x20,0x10,0x07]
+                                       # CHECK-NEXT:                   # <MCInst #{{[0-9]+}} FNEG_D32
         neg.s     $f1,$f15
         nop
         nor       $a3,$zero,$a3
+        not       $3, $4               # CHECK: not $3, $4             # encoding: [0x00,0x80,0x18,0x27]
+        not       $3                   # CHECK: not $3, $3             # encoding: [0x00,0x60,0x18,0x27]
         or        $12,$s0,$sp
         or        $2, 4                # CHECK: ori $2, $2, 4          # encoding: [0x34,0x42,0x00,0x04]
         pref      1, 8($5)             # CHECK: pref 1, 8($5)          # encoding: [0xcc,0xa1,0x00,0x08]
@@ -163,8 +204,10 @@ a:
         sltiu     $25,$25,-15531       # CHECK: sltiu $25, $25, -15531 # encoding: [0x2f,0x39,0xc3,0x55]
         sltu      $s4,$s5,$11          # CHECK: sltu  $20, $21, $11    # encoding: [0x02,0xab,0xa0,0x2b]
         sltu      $24,$25,-15531       # CHECK: sltiu $24, $25, -15531 # encoding: [0x2f,0x38,0xc3,0x55]
-        sqrt.d    $f17,$f22
-        sqrt.s    $f0,$f1
+        sqrt.d    $f0, $f12            # CHECK: sqrt.d  $f0, $f12      # encoding: [0x46,0x20,0x60,0x04]
+                                       # CHECK-NEXT:                   # <MCInst #{{[0-9]+}} FSQRT_D32
+        sqrt.s    $f0, $f12            # CHECK: sqrt.s  $f0, $f12      # encoding: [0x46,0x00,0x60,0x04]
+                                       # CHECK-NEXT:                   # <MCInst #{{[0-9]+}} FSQRT_S
         sra       $4, $5               # CHECK: srav $4, $4, $5        # encoding: [0x00,0xa4,0x20,0x07]
         sra       $s1,15               # CHECK: sra $17, $17, 15       # encoding: [0x00,0x11,0x8b,0xc3]
         sra       $s1,$s7,15           # CHECK: sra $17, $23, 15       # encoding: [0x00,0x17,0x8b,0xc3]
@@ -179,7 +222,8 @@ a:
         sub       $s6,$s3,$12
         sub       $22,$17,-3126        # CHECK: addi $22, $17, 3126    # encoding: [0x22,0x36,0x0c,0x36]
         sub       $13,6512             # CHECK: addi $13, $13, -6512   # encoding: [0x21,0xad,0xe6,0x90]
-        sub.d     $f18,$f3,$f17
+        sub.d     $f0, $f2, $f4        # CHECK: sub.d $f0, $f2, $f4    # encoding: [0x46,0x24,0x10,0x01]
+                                       # CHECK-NEXT:                   # <MCInst #{{[0-9]+}} FSUB_D32
         sub.s     $f23,$f22,$f22
         subu      $sp,$s6,$s6
         sw        $ra,-10160($sp)

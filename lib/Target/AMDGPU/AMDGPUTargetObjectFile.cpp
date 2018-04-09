@@ -9,10 +9,11 @@
 
 #include "AMDGPUTargetObjectFile.h"
 #include "AMDGPU.h"
+#include "AMDGPUTargetMachine.h"
+#include "Utils/AMDGPUBaseInfo.h"
+#include "llvm/BinaryFormat/ELF.h"
 #include "llvm/MC/MCContext.h"
 #include "llvm/MC/MCSectionELF.h"
-#include "llvm/Support/ELF.h"
-#include "Utils/AMDGPUBaseInfo.h"
 
 using namespace llvm;
 
@@ -21,10 +22,10 @@ using namespace llvm;
 //===----------------------------------------------------------------------===//
 
 MCSection *AMDGPUTargetObjectFile::SelectSectionForGlobal(
-    const GlobalValue *GV, SectionKind Kind, const TargetMachine &TM) const {
-  if (Kind.isReadOnly() && AMDGPU::isReadOnlySegment(GV) &&
+    const GlobalObject *GO, SectionKind Kind, const TargetMachine &TM) const {
+  if (Kind.isReadOnly() && AMDGPU::isReadOnlySegment(GO) &&
       AMDGPU::shouldEmitConstantsToTextSection(TM.getTargetTriple()))
     return TextSection;
 
-  return TargetLoweringObjectFileELF::SelectSectionForGlobal(GV, Kind, TM);
+  return TargetLoweringObjectFileELF::SelectSectionForGlobal(GO, Kind, TM);
 }

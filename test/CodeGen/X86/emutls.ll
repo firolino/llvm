@@ -1,10 +1,17 @@
-; RUN: llc < %s -emulated-tls -march=x86 -mtriple=i386-linux-gnu | FileCheck -check-prefix=X32 %s
-; RUN: llc < %s -emulated-tls -march=x86-64 -mtriple=x86_64-linux-gnu | FileCheck -check-prefix=X64 %s
-; RUN: llc < %s -emulated-tls -march=x86 -mtriple=x86-linux-android | FileCheck -check-prefix=X32 %s
-; RUN: llc < %s -emulated-tls -march=x86-64 -mtriple=x86_64-linux-android | FileCheck -check-prefix=X64 %s
+; RUN: llc < %s -emulated-tls -mtriple=i386-linux-gnu | FileCheck -check-prefix=X32 %s
+; RUN: llc < %s -emulated-tls -mtriple=x86_64-linux-gnu | FileCheck -check-prefix=X64 %s
+; RUN: llc < %s -emulated-tls -mtriple=i386-linux-android | FileCheck -check-prefix=X32 %s
+; RUN: llc < %s -emulated-tls -mtriple=x86_64-linux-android | FileCheck -check-prefix=X64 %s
+
+; RUN: llc < %s -mtriple=i386-linux-gnu | FileCheck -check-prefix=NoEMU %s
+; RUN: llc < %s -mtriple=x86_64-linux-gnu | FileCheck -check-prefix=NoEMU %s
+; RUN: llc < %s -mtriple=i386-linux-android | FileCheck -check-prefix=X32 %s
+; RUN: llc < %s -mtriple=x86_64-linux-android | FileCheck -check-prefix=X64 %s
 
 ; Copied from tls.ll; emulated TLS model is not implemented
-; for *-pc-win32 and *-pc-winows targets yet.
+; for *-pc-win32 and *-pc-windows targets yet.
+
+; NoEMU-NOT: __emutls
 
 ; Use my_emutls_get_address like __emutls_get_address.
 @my_emutls_v_xyz = external global i8*, align 4

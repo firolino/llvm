@@ -99,6 +99,12 @@ class SchedMachineModel {
   // resulting from changes to the instruction definitions.
   bit CompleteModel = 1;
 
+  // Indicates that we should do full overlap checking for multiple InstrRWs
+  // definining the same instructions within the same SchedMachineModel.
+  // FIXME: Remove when all in tree targets are clean with the full check
+  // enabled.
+  bit FullInstRWOverlapCheck = 1;
+
   // A processor may only implement part of published ISA, due to either new ISA
   // extensions, (e.g. Pentium 4 doesn't have AVX) or implementation
   // (ARM/MIPS/PowerPC/SPARC soft float cores).
@@ -139,7 +145,7 @@ class ProcResourceKind;
 // changes this to an in-order issue/dispatch resource. In this case,
 // the scheduler counts down from the cycle that the instruction
 // issues in-order, forcing a stall whenever a subsequent instruction
-// requires the same resource until the number of ResourceCyles
+// requires the same resource until the number of ResourceCycles
 // specified in WriteRes expire. Setting BufferSize=1 changes this to
 // an in-order latency resource. In this case, the scheduler models
 // producer/consumer stalls between instructions that use the
@@ -175,8 +181,7 @@ class ProcResourceKind;
 // BufferSize=1.
 //
 // SchedModel ties these units to a processor for any stand-alone defs
-// of this class. Instances of subclass ProcResource will be automatically
-// attached to a processor, so SchedModel is not needed.
+// of this class.
 class ProcResourceUnits<ProcResourceKind kind, int num> {
   ProcResourceKind Kind = kind;
   int NumUnits = num;
@@ -255,6 +260,9 @@ class ProcWriteResources<list<ProcResourceKind> resources> {
   // Allow a processor to mark some scheduling classes as unsupported
   // for stronger verification.
   bit Unsupported = 0;
+  // Allow a processor to mark some scheduling classes as single-issue.
+  // SingleIssue is an alias for Begin/End Group.
+  bit SingleIssue = 0;
   SchedMachineModel SchedModel = ?;
 }
 
@@ -331,7 +339,7 @@ class ReadAdvance<SchedRead read, int cycles, list<SchedWrite> writes = []>
 }
 
 // Directly associate a new SchedRead type with a delay and optional
-// pipeline bypess. For use with InstRW or ItinRW.
+// pipeline bypass. For use with InstRW or ItinRW.
 class SchedReadAdvance<int cycles, list<SchedWrite> writes = []> : SchedRead,
   ProcReadAdvance<cycles, writes>;
 
@@ -434,3 +442,37 @@ class SchedAlias<SchedReadWrite match, SchedReadWrite alias> {
   SchedReadWrite AliasRW = alias;
   SchedMachineModel SchedModel = ?;
 }
+
+// Allow the definition of processor register files.
+// Each processor register file declares the number of physical registers, as
+// well as a optional register cost information. The cost of a register R is the
+// number of physical registers used to rename R (at register renaming stage).
+// That value defaults to 1, to all the registers contained in the register
+// file. The set of target register files is inferred from the list of register
+// classes. Register costs are defined at register class granularity. An empty
+// list of register classes means that this register file contains all the
+// registers defined by the target.
+class RegisterFile<int numPhysRegs, list<RegisterClass> Classes = [],
+                   list<int> Costs = []> {
+  list<RegisterClass> RegClasses = Classes;
+  list<int> RegCosts = Costs;
+  int NumPhysRegs = numPhysRegs;
+  SchedMachineModel SchedModel = ?;
+}
+
+// Describe the retire control unit.
+// A retire control unit specifies the size of the reorder buffer, as well as
+// the maximum number of opcodes that can be retired every cycle.
+// A value less-than-or-equal-to zero for field 'ReorderBufferSize' means: "the
+// size is unknown". The idea is that external tools can fall-back to using
+// field MicroOpBufferSize in SchedModel if the reorder buffer size is unknown.
+// A zero or negative value for field 'MaxRetirePerCycle' means "no
+// restrictions on the number of instructions retired per cycle".
+// Models can optionally specify up to one instance of RetireControlUnit per
+// scheduling model.
+class RetireControlUnit<int bufferSize, int retirePerCycle> {
+  int ReorderBufferSize = bufferSize;
+  int MaxRetirePerCycle = retirePerCycle;
+  SchedMachineModel SchedModel = ?;
+}
+

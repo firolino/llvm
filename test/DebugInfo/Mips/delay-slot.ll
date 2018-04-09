@@ -1,4 +1,4 @@
-; RUN: llc -filetype=obj -O0 -relocation-model=pic < %s -mtriple mips-unknown-linux-gnu | llvm-dwarfdump - | FileCheck %s
+; RUN: llc -filetype=obj -O0 -relocation-model=pic < %s -mtriple mips-unknown-linux-gnu | llvm-dwarfdump -a - | FileCheck %s
 ; PR19815
 
 ; Generated using clang -target mips-linux-gnu -g test.c -S -o - -flto|opt -sroa -S
@@ -13,11 +13,9 @@
 ; CHECK: Address            Line   Column File   ISA Discriminator Flags
 ; CHECK: ------------------ ------ ------ ------ --- ------------- -------------
 ; CHECK: 0x0000000000000000      1      0      1   0             0  is_stmt
-; FIXME: The next address probably ought to be 0x0000000000000004 but there's
-;        a constant initialization before the prologue's end.
-; CHECK: 0x0000000000000008      2      0      1   0             0  is_stmt prologue_end
-; CHECK: 0x000000000000002c      3      0      1   0             0  is_stmt
-; CHECK: 0x000000000000003c      4      0      1   0             0  is_stmt
+; CHECK: 0x0000000000000004      2      0      1   0             0  is_stmt prologue_end
+; CHECK: 0x0000000000000024      3      0      1   0             0  is_stmt
+; CHECK: 0x0000000000000034      4      0      1   0             0  is_stmt
 ; CHECK: 0x0000000000000048      5      0      1   0             0  is_stmt
 ; CHECK: 0x0000000000000058      5      0      1   0             0  is_stmt end_sequence
 
@@ -28,7 +26,7 @@ target triple = "mips--linux-gnu"
 ; Function Attrs: nounwind
 define i32 @foo(i32 %x) #0 !dbg !4 {
 entry:
-  call void @llvm.dbg.value(metadata i32 %x, i64 0, metadata !12, metadata !DIExpression()), !dbg !13
+  call void @llvm.dbg.value(metadata i32 %x, metadata !12, metadata !DIExpression()), !dbg !13
   %tobool = icmp ne i32 %x, 0, !dbg !14
   br i1 %tobool, label %if.then, label %if.end, !dbg !14
 
@@ -47,7 +45,7 @@ return:                                           ; preds = %if.end, %if.then
 declare void @llvm.dbg.declare(metadata, metadata, metadata) #1
 
 ; Function Attrs: nounwind readnone
-declare void @llvm.dbg.value(metadata, i64, metadata, metadata) #1
+declare void @llvm.dbg.value(metadata, metadata, metadata) #1
 
 attributes #0 = { nounwind }
 attributes #1 = { nounwind readnone }

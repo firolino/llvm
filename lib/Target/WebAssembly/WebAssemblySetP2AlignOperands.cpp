@@ -12,8 +12,8 @@
 ///
 //===----------------------------------------------------------------------===//
 
-#include "WebAssembly.h"
 #include "MCTargetDesc/WebAssemblyMCTargetDesc.h"
+#include "WebAssembly.h"
 #include "WebAssemblyMachineFunctionInfo.h"
 #include "llvm/CodeGen/MachineBlockFrequencyInfo.h"
 #include "llvm/CodeGen/MachineMemOperand.h"
@@ -46,6 +46,10 @@ public:
 } // end anonymous namespace
 
 char WebAssemblySetP2AlignOperands::ID = 0;
+INITIALIZE_PASS(WebAssemblySetP2AlignOperands, DEBUG_TYPE,
+                "Set the p2align operands for WebAssembly loads and stores",
+                false, false)
+
 FunctionPass *llvm::createWebAssemblySetP2AlignOperands() {
   return new WebAssemblySetP2AlignOperands();
 }
@@ -96,6 +100,13 @@ bool WebAssemblySetP2AlignOperands::runOnMachineFunction(MachineFunction &MF) {
       case WebAssembly::LOAD16_U_I64:
       case WebAssembly::LOAD32_S_I64:
       case WebAssembly::LOAD32_U_I64:
+      case WebAssembly::ATOMIC_LOAD_I32:
+      case WebAssembly::ATOMIC_LOAD8_U_I32:
+      case WebAssembly::ATOMIC_LOAD16_U_I32:
+      case WebAssembly::ATOMIC_LOAD_I64:
+      case WebAssembly::ATOMIC_LOAD8_U_I64:
+      case WebAssembly::ATOMIC_LOAD16_U_I64:
+      case WebAssembly::ATOMIC_LOAD32_U_I64:
         RewriteP2Align(MI, WebAssembly::LoadP2AlignOperandNo);
         break;
       case WebAssembly::STORE_I32:
